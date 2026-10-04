@@ -1,0 +1,17 @@
+# Secrets and local state — never commit these.
+.env
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# OS noise
+.DS_Store
+Thumbs.db

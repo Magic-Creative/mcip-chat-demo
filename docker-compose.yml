@@ -1,0 +1,33 @@
+# Run the demo with its own SQLite volume next to a Cloudflare tunnel.
+# `docker compose up -d --build`, then point the tunnel at 127.0.0.1:8090.
+services:
+  demo:
+    build: .
+    image: mcip-chat-demo:local
+    env_file: .env
+    environment:
+      # The named volume, not the working tree: survive rebuilds.
+      DEMO_DB_PATH: /data/demo.db
+      # Port is loopback-only (below), so the tunnel is the only caller and
+      # CF-Connecting-IP is trustworthy. Set "false" if the port is ever
+      # published beyond 127.0.0.1.
+      DEMO_TRUST_CF_HEADER: "true"
+    ports:
+      # Loopback only: the tunnel reaches it, the internet does not.
+      - "127.0.0.1:8090:8090"
+    volumes:
+      - demo-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  demo-data:

@@ -1,0 +1,43 @@
+[project]
+name = "mcip-chat-demo"
+version = "1.0.0"
+description = "Reference chatbot showing how to integrate with the MCip External Chat API"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "argon2-cffi==25.1.0",
+    "cryptography==50.0.2",
+    "fastapi==0.142.2",
+    "httpx==0.28.1",
+    "itsdangerous==2.2.0",
+    "uvicorn==0.54.0",
+]
+
+[tool.uv]
+package = false
+add-bounds = "exact"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "S", "ASYNC"]
+ignore = ["S101"] # asserts are fine in tests
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106", "S107"] # test fixtures use obvious fake secrets
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "smoke: hits a live MCip deployment (needs MCIP_SMOKE_* env); skipped by default",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "ruff==0.16.10",
+]

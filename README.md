@@ -1,0 +1,193 @@
+# MCip chat demo
+
+A complete reference integration for the **MCip External Chat API** (`/api/v1/ext`):
+a browser chat UI in front of a small FastAPI backend that holds **each user's own
+MCip API key** and relays MCip's SSE answer stream back to the browser.
+
+It is the working example that accompanies the integration guide
+([`docs/integration-guide.md`](docs/integration-guide.md)): every error-code branch,
+retry rule and storage rule in the guide has a named place in this code — the
+[file map](#which-file-shows-what) below points at them.
+
+```
+Your user ──► this demo's UI ──► this demo's backend ── looks up this user's key
+                                       │
+                                       ▼   POST /api/v1/ext/chat
+                                   MCip External Chat API
+                                       │   Authorization: Bearer ss_pat_…  (that user)
+                                       ▼
+                                   SSE: start → delta… → citation… → done
+```
+
+What it demonstrates, end to end:
+
+- **Per-user keys.** The key is pasted once (write-only in the UI), validated with
+  `GET /me`, encrypted at rest (Fernet), and only ever shown back as its 16-character
+  prefix. Disconnecting deletes the stored ciphertext.
+- **The SSE relay.** MCip's `start` / `delta` / `status` / `citation` /
+  `action_rejected` / `error` / `done` events are normalized for the browser, with a
+  `ui` state and a one-line `advice` attached to every error. MCip's `: keep-alive`
+  heartbeats are forwarded as SSE comments, so slow turns stream through proxies
+  (Cloudflare cuts idle connections at 100 s) without a stall.
+- **Retries with a countdown.** 429 / 409-busy / 5xx / network failures are retried in
+  the backend (up to 4 attempts, same `client_request_id`) while the browser shows each
+  retry live. A stream cut before `done` becomes `STREAM_TRUNCATED` — the browser's
+  **Retry** button re-sends the same `client_request_id`, and a turn that finished
+  server-side comes back as stored JSON ("recovered, not charged again").
+- **A working GUI.** Sign-in, workspace picker, streaming markdown with citations,
+  conversation list, transcript pagination from MCip, delete, stop, light/dark theme,
+  responsive drawer — as plain static files, no build step.
+- **Chat hardening.** HttpOnly session cookie, CSRF double-submit on every
+  state-changing route, strict CSP (no inline code), demo-side rate limits, and a log
+  filter that redacts `ss_pat_…` keys.
+
+## Quick start
+
+You need an MCip deployment with an **API client** registered for this demo and a
+workspace with **"API key access"** turned on — see
+[`docs/integration-guide.md` §2](docs/integration-guide.md#2-onboarding). Each demo
+user then creates their own *External system* chat key in MCip and pastes it into the
+"Connect MCip" screen.
+
+### Option A — locally with uv (Python 3.12+)
+
+```bash
+uv sync
+cp .env.example .env                 # set MCIP_BASE_URL + the two secrets below
+uv run python -m app.admin_cli add-user alice   # prints a password once
+uv run uvicorn app.main:app --port 8090
+```
+
+No uv? Create a venv, `pip install` the pinned dependencies from `pyproject.toml`,
+then run the same two commands with that Python.
+
+### Option B — Docker Compose
+
+```bash
+cp .env.example .env                 # same three settings
+docker compose up -d --build
+docker compose exec demo python -m app.admin_cli add-user alice
+```
+
+The image installs from `requirements.txt` — the frozen, hash-pinned export of
+`uv.lock` (transitive dependencies included, every wheel verified with
+`pip --require-hashes`). After changing `pyproject.toml` or `uv.lock`, regenerate it:
+
+```bash
+uv export --frozen --no-dev --format requirements-txt --no-emit-project \
+    --output-file requirements.txt
+```
+
+Either way the demo is on <http://127.0.0.1:8090> (loopback only). Run it as a
+single Uvicorn worker: the rate limiter is an in-process, in-memory counter, so
+`--workers N` would multiply the configured limits by N.
+
+### Configuration
+
+Everything is read from the environment (and `.env`, if present — real environment
+variables win). Only the first three are required:
+
+| Variable | Purpose |
+|---|---|
+| `MCIP_BASE_URL` | Your MCip deployment, e.g. `https://mcip.example.com` (no `/api/v1/ext` suffix — the demo appends it). |
+| `DEMO_ENCRYPTION_KEY` | Fernet key that encrypts stored MCip API keys at rest. Rotating it disconnects everyone. |
+| `DEMO_SESSION_SECRET` | Signs the demo's session cookies (32+ random characters). |
+| `DEMO_ALLOW_REGISTER` | `false` (default): accounts are created with the admin CLI. `true` opens self-registration. |
+| `DEMO_HTTPS_ONLY` | `true` when served over HTTPS: cookies get the `Secure` flag and HSTS is sent. |
+| `DEMO_TRUST_CF_HEADER` | `true` (default): client IPs are read from `CF-Connecting-IP`, which the documented Cloudflare-tunnel deployment guarantees. Set `false` if the port is ever reachable directly. |
+| `DEMO_DB_PATH` | SQLite file (default `./data/demo.db`). |
+| `DEMO_PORT` | Listen port (default `8090`). |
+| `DEMO_LOGIN_RATE_PER_MIN` / `DEMO_CHAT_RATE_PER_MIN` | Demo-side limits: logins per IP, messages per user (defaults 5 / 20). |
+
+Manage demo users where the database and `DEMO_ENCRYPTION_KEY` live:
+
+```bash
+python -m app.admin_cli add-user alice [--password '…']
+python -m app.admin_cli list-users
+python -m app.admin_cli reset-password alice
+python -m app.admin_cli remove-user alice        # also drops their key + chats
+```
+
+## The 10-minute acceptance path
+
+1. **Sign in** as a user you created. With `DEMO_ALLOW_REGISTER=true` you can register
+   in the UI instead.
+2. **Connect MCip**: paste the user's `ss_pat_…` chat key. The demo answers with who
+   you are connected as, the key's expiry and the workspaces it may use — and never
+   echoes the key. A wrong paste (e.g. a full-access key) shows the exact
+   `errorCode` and the fix next to it.
+3. **Choose a workspace** from the key's list.
+4. **Ask a question.** The answer streams in as markdown; status lines appear while the
+   agent works; citations from your MCip documents are listed under the answer.
+5. **Send a second question** in the same chat, then start a **New chat** — the sidebar
+   lists local conversations; opening an older one reloads its transcript *from MCip*
+   (use "Load older messages" for pagination).
+6. **Watch a retry.** Send two messages on the same conversation at once (e.g. two
+   tabs): the second gets `CONVERSATION_BUSY`, shows "retrying in Ns (attempt k/4)",
+   then either continues or offers Retry. Stop a running answer with **Stop** and use
+   **Retry** — the same `client_request_id` is reused, so a finished turn comes back as
+   a replay instead of costing credits again.
+7. **Delete a conversation** — it is deleted in MCip too.
+8. **Disconnect** (or Sign out and back in): the stored key ciphertext is gone; the key
+   itself stays valid in MCip until the user deletes it there.
+
+## Which file shows what
+
+| File | Read it for | Guide |
+|---|---|---|
+| `app/mcip.py` | The `/ext` HTTP client: request shapes, SSE parsing, `Retry-After` / `retry_after_ms` rules, the replay/content-type branch. Adapted from the example client in the guide. | §3–§5, §8 |
+| `app/relay.py` | The retry loop and the browser protocol: retry notices, `ui`/`advice` on errors, truncation → `STREAM_TRUNCATED`, what is retried and what is not. | §5, §7, §8 |
+| `app/errors.py` | The `errorCode` → `ui` state + `advice` table the whole UI switches on. | §6 |
+| `app/main.py` | The demo's own API: session/CSRF, connect flow (`GET /me`), workspace, chat SSE route, transcripts, delete; CSP and rate limits. | §4, §7, §11 |
+| `app/store.py` | SQLite + Fernet: how keys are stored, the 16-char prefix rule, log redaction. | §11 |
+| `app/config.py` | `.env` / environment loading. | — |
+| `app/admin_cli.py` | `demo-admin` user management. | — |
+| `static/app.js` / `static/chat.js` | The GUI: session boot, API calls, the chat state machine (SSE parsing, retry UI, replay notice). | — |
+| `tests/fake_mcip.py` | A scriptable fake MCip (ASGI app): SSE scripts, error queues, idempotent replay — no network needed. | — |
+| `tests/` | The suite: relay semantics, error table, key storage, CSRF/API, admin CLI. | — |
+| `docs/integration-guide.md` | The full API guide this demo implements, in-repo. | all |
+| `docs/deploy-cloudflare-tunnel.md` | Runbook for exposing the demo on a hostname via Cloudflare Tunnel + Access. | §7 |
+
+`app/mcip.py` and `app/relay.py` are deliberately small and dependency-light — they are
+the parts to copy into your own caller backend.
+
+## Security notes
+
+- **Keys are passwords.** They go in through one route, are encrypted at rest, are used
+  only server-side as the outgoing `Authorization` header, and never appear in any
+  response, URL or log line (a logging filter redacts `ss_pat_…` patterns; the UI and
+  logs use the 16-character prefix).
+- **The browser is treated as hostile**: HttpOnly `SameSite=Lax` signed session cookie,
+  CSRF double-submit token on every `POST`/`PUT`/`DELETE`, strict
+  `Content-Security-Policy` (`default-src 'self'`, no inline code), `no-referrer`,
+  `nosniff`, and vendored JS with recorded hashes (`static/vendor/README.md`).
+- **Limits**: demo-side login 5/min per IP (Cloudflare-aware via `CF-Connecting-IP`
+  when `DEMO_TRUST_CF_HEADER` is on) and 20 messages/min per user, counted in-process
+  (single worker); MCip's own per-key/client limits still apply and surface as
+  `RATE_LIMITED` / `CLIENT_RATE_LIMITED` with their countdowns.
+- **Scope**: this is a demo — SQLite, a single process, in-memory rate limiter. For
+  anything internet-facing run it behind an identity-aware proxy; see
+  [`docs/deploy-cloudflare-tunnel.md`](docs/deploy-cloudflare-tunnel.md). Report
+  vulnerabilities as described in [`SECURITY.md`](SECURITY.md).
+
+## Tests
+
+```bash
+uv run pytest                 # 70 tests, ~7 s, no network
+uv run ruff check .           # lint
+```
+
+The suite runs the demo app and MCip (a scriptable fake, `tests/fake_mcip.py`) against
+each other over in-process ASGI transports — SSE replay semantics, retry budgets, the
+error table, Fernet storage, CSRF, the CLI. A live check against a real deployment is
+opt-in:
+
+```bash
+MCIP_SMOKE_BASE_URL=https://mcip.example.com \
+MCIP_SMOKE_KEY=ss_pat_… MCIP_SMOKE_WORKSPACE_ID=12 \
+uv run pytest -m smoke -v
+```
+
+## License
+
+Apache-2.0 — see [`LICENSE`](LICENSE).

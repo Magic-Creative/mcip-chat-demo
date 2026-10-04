@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en" data-theme="auto">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="Reference chatbot for the MCip External Chat API: streamed answers, citations and approvals.">
+  <title>MCip chat demo</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#composer-input">Skip to the message box</a>
+
+  <header class="topbar">
+    <button id="drawer-toggle" class="icon-button" type="button" hidden
+            aria-label="Show conversations" aria-expanded="false" aria-controls="sidebar">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
+        <path d="M3 6h18M3 12h18M3 18h18" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round"/>
+      </svg>
+    </button>
+    <h1 class="brand">MCip chat demo</h1>
+    <span id="host-chip" class="chip" hidden></span>
+    <span class="topbar-spacer"></span>
+    <span id="user-chip" class="chip" hidden></span>
+    <button id="theme-toggle" class="icon-button" type="button" aria-label="Switch between light and dark theme">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
+        <circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="2"/>
+        <path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"
+              fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+    </button>
+    <button id="signout-button" class="button ghost" type="button" hidden>Sign out</button>
+  </header>
+
+  <div id="banner" class="banner" role="alert" hidden>
+    <span id="banner-text"></span>
+    <button id="banner-action" class="button" type="button" hidden></button>
+  </div>
+
+  <main id="main">
+    <!-- Sign in / register -->
+    <section id="view-auth" class="view centered" hidden>
+      <div class="card">
+        <h2>Sign in</h2>
+        <p class="muted">
+          Demo accounts are created by the demo admin. Your MCip API key is
+          stored encrypted on this server and never reaches the browser.
+        </p>
+        <form id="form-login" class="stack" novalidate>
+          <label for="login-username">Username</label>
+          <input id="login-username" name="username" autocomplete="username"
+                 autocapitalize="none" spellcheck="false" required>
+          <label for="login-password">Password</label>
+          <input id="login-password" name="password" type="password"
+                 autocomplete="current-password" required>
+          <p id="login-error" class="field-error" role="alert" hidden></p>
+          <button id="login-submit" class="button primary" type="submit">Sign in</button>
+        </form>
+
+        <form id="form-register" class="stack" hidden novalidate>
+          <p class="muted">
+            Usernames: 3&ndash;32 characters, lower-case letters, digits,
+            <code>. _ -</code>. Passwords: at least 8 characters.
+          </p>
+          <label for="register-username">Username</label>
+          <input id="register-username" name="username" autocomplete="username"
+                 autocapitalize="none" spellcheck="false" required>
+          <label for="register-password">Password</label>
+          <input id="register-password" name="password" type="password"
+                 autocomplete="new-password" required>
+          <p id="register-error" class="field-error" role="alert" hidden></p>
+          <button id="register-submit" class="button primary" type="submit">Create account</button>
+        </form>
+
+        <p class="muted small">
+          <button id="toggle-register" class="link" type="button" hidden>
+            Create an account
+          </button>
+        </p>
+      </div>
+    </section>
+
+    <!-- Connect MCip -->
+    <section id="view-connect" class="view centered" hidden>
+      <div class="card">
+        <h2>Connect MCip</h2>
+        <p class="muted">
+          Sign in to <strong id="connect-host">MCip</strong>, open
+          <a id="connect-link" href="#" target="_blank" rel="noopener">your API keys page</a>,
+          create an <em>External system</em> (chat) key and paste it here.
+        </p>
+        <form id="form-connect" class="stack" novalidate>
+          <label for="connect-key">MCip API key</label>
+          <input id="connect-key" name="key" type="password" autocomplete="off"
+                 spellcheck="false" placeholder="ss_pat_" required>
+          <p class="muted small">
+            The key is encrypted before it is stored. Only its first 16
+            characters are ever shown back, and it is never sent to the browser.
+          </p>
+          <p id="connect-error" class="field-error" role="alert" hidden></p>
+          <button id="connect-submit" class="button primary" type="submit">Connect</button>
+        </form>
+        <p class="muted small">
+          Revoke the key any time in MCip; the demo stops working immediately.
+        </p>
+      </div>
+    </section>
+
+    <!-- Workspace picker -->
+    <section id="view-workspace" class="view centered" hidden>
+      <div class="card">
+        <h2>Choose a workspace</h2>
+        <p class="muted">
+          Your key may be used with the workspaces below. Pick the one this
+          demo should chat in.
+        </p>
+        <p id="workspace-error" class="field-error" role="alert" hidden></p>
+        <ul id="workspace-list" class="workspace-list"></ul>
+      </div>
+    </section>
+
+    <!-- Chat -->
+    <section id="view-chat" class="view chat-layout" hidden>
+      <aside id="sidebar" class="sidebar" aria-label="Conversations">
+        <div class="sidebar-head">
+          <button id="new-chat" class="button primary block" type="button">New chat</button>
+        </div>
+        <p id="conversation-error" class="field-error" role="alert" hidden></p>
+        <ul id="conversation-list" class="conversation-list"></ul>
+        <div class="sidebar-foot">
+          <p id="connection-summary" class="muted small"></p>
+          <button id="disconnect" class="button ghost block" type="button">Disconnect MCip key</button>
+        </div>
+      </aside>
+      <div id="scrim" class="scrim" hidden></div>
+
+      <div class="chat">
+        <div id="messages" class="messages" role="log" aria-live="off" aria-label="Conversation">
+          <div id="empty-state" class="empty-state">
+            <h2>Ask about your workspace</h2>
+            <p class="muted">
+              Answers come from <span id="empty-host">MCip</span> through this
+              server, using the key you connected.
+            </p>
+          </div>
+        </div>
+
+        <div class="composer-wrap">
+          <p id="status-line" class="status-line" role="status" aria-live="polite"></p>
+          <form id="composer" class="composer">
+            <label class="visually-hidden" for="composer-input">Message</label>
+            <textarea id="composer-input" rows="1" maxlength="32000"
+                      placeholder="Message — Enter sends, Shift+Enter adds a line"></textarea>
+            <button id="stop-button" class="button ghost" type="button" hidden>Stop</button>
+            <button id="send-button" class="button primary" type="submit">Send</button>
+          </form>
+          <p class="muted small composer-hint">
+            Enter sends &middot; Shift+Enter adds a line &middot; Ctrl+K jumps here
+          </p>
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
