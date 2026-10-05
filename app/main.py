@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import mimetypes
 import secrets
 import time
 from collections import deque
@@ -59,6 +60,12 @@ from app.store import (
 )
 
 logger = logging.getLogger("demo")
+
+# On Windows, Python reads MIME types from the registry, which can map .js to
+# text/plain; browsers then refuse the ES module (app.js). Pin the right types.
+mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("text/javascript", ".mjs")
+mimetypes.add_type("image/svg+xml", ".svg")
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 USERNAME_PATTERN = r"^[a-z0-9][a-z0-9_.\-]{2,31}$"

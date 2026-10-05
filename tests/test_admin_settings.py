@@ -301,3 +301,11 @@ def test_old_database_gains_the_admin_column(tmp_path, settings) -> None:
     assert user["is_admin"] == 0
     assert store.set_admin("old", True)
     assert store.is_admin(user["id"]) is True
+
+
+async def test_static_javascript_is_served_as_javascript(session: DemoSession) -> None:
+    """ES modules load only with a JavaScript MIME type (Windows registry quirk)."""
+    for path in ("/static/app.js", "/static/vendor/purify.es.mjs"):
+        response = await session.client.get(path)
+        assert response.status_code == 200, path
+        assert response.headers["content-type"].startswith("text/javascript"), path

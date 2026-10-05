@@ -269,9 +269,9 @@ function describeSettings(view) {
   if (view.mcip_base_url_source === 'settings') {
     urlHint.textContent = `Saved by ${view.mcip_base_url_updated_by || 'an admin'} on ${formatWhen(view.mcip_base_url_updated_at)}.`;
   } else if (view.mcip_base_url_source === 'env') {
-    urlHint.textContent = 'Currently the MCIP_BASE_URL default from the server's .env. Save to keep it here.';
+    urlHint.textContent = "Currently the MCIP_BASE_URL default from the server's .env. Save to keep it here.";
   } else {
-    urlHint.textContent = 'Not set yet: users can't connect until it is.';
+    urlHint.textContent = "Not set yet: users can't connect until it is.";
   }
   $('settings-key-hint').textContent = view.client_key_prefix
     ? `Stored: ${view.client_key_prefix}… (saved by ${view.client_key_updated_by || 'an admin'} on ${formatWhen(view.client_key_updated_at)}). Leave blank to keep it.`
