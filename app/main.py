@@ -24,6 +24,7 @@ Security posture (Guide §11, and "Public-exposure safeguards" in the issue):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import mimetypes
@@ -40,7 +41,7 @@ from urllib.parse import urlsplit
 import httpx
 from fastapi import Depends, FastAPI, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -68,6 +69,18 @@ mimetypes.add_type("text/javascript", ".mjs")
 mimetypes.add_type("image/svg+xml", ".svg")
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+
+
+def static_build_id(directory: Path = STATIC_DIR) -> str:
+    """A short hash of every file under ``static/``: changes on every deploy
+    that touches the UI, so asset URLs change and no cache serves old files."""
+    digest = hashlib.sha256()
+    for path in sorted(p for p in directory.rglob("*") if p.is_file()):
+        digest.update(path.relative_to(directory).as_posix().encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()[:12]
+
+
 USERNAME_PATTERN = r"^[a-z0-9][a-z0-9_.\-]{2,31}$"
 MIN_PASSWORD_LENGTH = 8
 COOKIE_MAX_AGE = 14 * 24 * 3600
@@ -238,6 +251,14 @@ def create_app(
     app.state.settings = settings
     app.state.store = store
     app.state.limiter = RateLimiter()
+    build_id = static_build_id()
+    asset_prefix = f"/s/{build_id}"
+    app.state.build_id = build_id
+    index_html = (
+        (STATIC_DIR / "index.html")
+        .read_text(encoding="utf-8")
+        .replace('"/static/', f'"{asset_prefix}/')
+    )
 
     app.add_middleware(
         SessionMiddleware,
@@ -457,10 +478,10 @@ def create_app(
             "Permissions-Policy", "camera=(), microphone=(), geolocation=()"
         )
         response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
-        if request.url.path.startswith("/static/"):
-            # Revalidate every load (ETag/Last-Modified make that a cheap 304):
-            # without an explicit header, Cloudflare caches for 4 h, and after a
-            # deploy browsers would mix the new index.html with an old app.js.
+        if request.url.path.startswith(f"/s/{app.state.build_id}/"):
+            # Versioned per build: safe to cache for good.
+            response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
+        elif request.url.path.startswith("/static/"):
             response.headers.setdefault("Cache-Control", "no-cache")
         if settings.https_only:
             response.headers.setdefault(
@@ -471,13 +492,22 @@ def create_app(
     # -- pages and health ---------------------------------------------------
 
     @app.get("/", include_in_schema=False)
-    async def index() -> FileResponse:
-        return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})
+    async def index() -> Response:
+        # The page itself is never cached; its assets live under a per-build
+        # path (/s/<build>/...), so a deploy can't mix new HTML with old JS
+        # even when a CDN overrides Cache-Control (Cloudflare's browser TTL).
+        return Response(
+            index_html,
+            media_type="text/html; charset=utf-8",
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/healthz", include_in_schema=False)
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
+    app.mount(asset_prefix, StaticFiles(directory=STATIC_DIR), name="assets")
+    # Unversioned path kept for anything that still links /static/...
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     # -- session and auth ---------------------------------------------------
