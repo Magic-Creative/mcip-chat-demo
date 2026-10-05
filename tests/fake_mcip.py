@@ -60,6 +60,9 @@ class FakeMcip:
         self.queue: deque[dict[str, Any]] = deque()
         self.chat_requests: list[dict[str, Any]] = []
         self.me_requests: list[str] = []  # Authorization headers seen
+        self.client_keys_seen: list[str | None] = []  # X-MCip-Client-Key on /me
+        #: When set, /me requires this X-MCip-Client-Key (MCip #1207 behaviour).
+        self.required_client_key: str | None = None
         self.completed: dict[str, dict[str, Any]] = {}  # idempotency key → turn body
         self.executed_turns = 0  # scripted turns run (replays don't count)
         self.transcripts: dict[int, list[dict[str, Any]]] = {}
@@ -104,15 +107,28 @@ class FakeMcip:
         self.deleted.clear()
         self.me_error = None
         self.me_payload = DEFAULT_ME
+        self.client_keys_seen.clear()
+        self.required_client_key = None
 
     # -- the ASGI app --------------------------------------------------------
 
     def _build(self) -> FastAPI:
         app = FastAPI()
 
+        @app.get(f"{API_PREFIX}/openapi.json")
+        async def openapi() -> Response:
+            return JSONResponse({"openapi": "3.1.0", "info": {"version": "1.0.0"}})
+
         @app.get(f"{API_PREFIX}/me")
         async def me(request: Request) -> Response:
             self.me_requests.append(request.headers.get("authorization", ""))
+            client_key = request.headers.get("x-mcip-client-key")
+            self.client_keys_seen.append(client_key)
+            if self.required_client_key is not None:
+                if not client_key:
+                    return JSONResponse(error_body("CLIENT_KEY_MISSING"), status_code=401)
+                if client_key != self.required_client_key:
+                    return JSONResponse(error_body("CLIENT_KEY_INVALID"), status_code=401)
             if self.me_error is not None:
                 status, body = self.me_error
                 return JSONResponse(body, status_code=status)

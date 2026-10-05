@@ -9,10 +9,12 @@ const THEME_CYCLE = ['auto', 'light', 'dark'];
 
 export const state = {
   csrfToken: '',
-  user: null, // {username}
+  user: null, // {username, is_admin}
   connection: null, // {display_name, email, key_prefix, workspaces, workspace, ...}
   mcipHost: '',
   allowRegister: false,
+  configured: false, // an MCip base URL is set (admin Settings)
+  settingsOpen: false,
 };
 
 export class ApiError extends Error {
@@ -77,7 +79,14 @@ function hideBanner() {
 
 /* -- views ----------------------------------------------------------------- */
 
-const VIEWS = ['view-auth', 'view-connect', 'view-workspace', 'view-chat'];
+const VIEWS = [
+  'view-auth',
+  'view-unconfigured',
+  'view-settings',
+  'view-connect',
+  'view-workspace',
+  'view-chat',
+];
 
 function show(viewId) {
   for (const id of VIEWS) $(id).hidden = id !== viewId;
@@ -92,12 +101,21 @@ function isNarrow() {
 function route() {
   $('user-chip').hidden = !state.user;
   $('signout-button').hidden = !state.user;
-  if (state.user) $('user-chip').textContent = state.user.username;
+  $('settings-button').hidden = !(state.user && state.user.is_admin);
+  if (state.user) {
+    $('user-chip').textContent = state.user.is_admin
+      ? `${state.user.username} (admin)`
+      : state.user.username;
+  }
   $('host-chip').hidden = !state.mcipHost;
   $('host-chip').textContent = state.mcipHost;
   $('empty-host').textContent = state.mcipHost || 'MCip';
 
   if (!state.user) return show('view-auth');
+  const isAdmin = Boolean(state.user.is_admin);
+  // Admins land on Settings until the MCip address is set (first run).
+  if (isAdmin && (state.settingsOpen || !state.configured)) return openSettings();
+  if (!state.configured) return show('view-unconfigured');
   if (!state.connection) return show('view-connect');
   if (!state.connection.workspace) return showWorkspacePicker();
   show('view-chat');
@@ -233,8 +251,7 @@ async function submitAuth(formId, errorId, path) {
     });
     state.csrfToken = payload.csrf_token; // rotates on every login
     state.user = payload.user;
-    const { connection } = await api('/api/connection');
-    state.connection = connection;
+    applySession(await api('/api/session')); // role, configured, connection
     form.reset();
     hideBanner();
     route();
@@ -242,6 +259,117 @@ async function submitAuth(formId, errorId, path) {
     fillError(errorBox, error);
   } finally {
     submit.disabled = false;
+  }
+}
+
+/* -- admin settings -------------------------------------------------------- */
+
+function describeSettings(view) {
+  const urlHint = $('settings-url-hint');
+  if (view.mcip_base_url_source === 'settings') {
+    urlHint.textContent = `Saved by ${view.mcip_base_url_updated_by || 'an admin'} on ${formatWhen(view.mcip_base_url_updated_at)}.`;
+  } else if (view.mcip_base_url_source === 'env') {
+    urlHint.textContent = "Currently the MCIP_BASE_URL default from the server's .env. Save to keep it here.";
+  } else {
+    urlHint.textContent = "Not set yet: users can't connect until it is.";
+  }
+  $('settings-key-hint').textContent = view.client_key_prefix
+    ? `Stored: ${view.client_key_prefix}… (saved by ${view.client_key_updated_by || 'an admin'} on ${formatWhen(view.client_key_updated_at)}). Leave blank to keep it.`
+    : 'No client key stored. Needed when the MCip API client requires one.';
+}
+
+function formatWhen(iso) {
+  if (!iso) return 'an unknown date';
+  const moment = new Date(iso);
+  return Number.isNaN(moment.getTime()) ? iso : moment.toLocaleString();
+}
+
+async function openSettings() {
+  show('view-settings');
+  clearError($('settings-error'));
+  $('settings-status').textContent = '';
+  try {
+    const { settings } = await api('/api/admin/settings');
+    $('settings-url').value = settings.mcip_base_url || '';
+    $('settings-client-key').value = '';
+    $('settings-clear-key').checked = false;
+    $('settings-clear-key').disabled = !settings.client_key_prefix;
+    describeSettings(settings);
+    $('settings-close').hidden = !state.configured;
+    $('settings-url').focus();
+  } catch (error) {
+    if (error instanceof ApiError && error.ui === 'auth') return sessionExpired(error.fullText);
+    fillError($('settings-error'), error);
+  }
+}
+
+async function saveSettings() {
+  const errorBox = $('settings-error');
+  clearError(errorBox);
+  const url = $('settings-url').value.trim();
+  const key = $('settings-client-key').value.trim();
+  const clearKey = $('settings-clear-key').checked;
+  const body = {};
+  if (url) body.mcip_base_url = url;
+  if (key) body.client_key = key;
+  if (clearKey) body.clear_client_key = true;
+  if (Object.keys(body).length === 0) {
+    fillError(errorBox, new Error('Enter the MCip address first.'));
+    return;
+  }
+  if (
+    !window.confirm(
+      'Saving a new MCip address or client key disconnects every user, including you. Continue?',
+    )
+  ) {
+    return;
+  }
+  const submit = $('settings-save');
+  submit.disabled = true;
+  try {
+    const result = await api('/api/admin/settings', { method: 'PUT', body, csrf: true });
+    $('settings-client-key').value = ''; // never keep the key in the DOM
+    $('settings-clear-key').checked = false;
+    $('settings-clear-key').disabled = !result.settings.client_key_prefix;
+    describeSettings(result.settings);
+    const session = await api('/api/session');
+    applySession(session);
+    $('settings-close').hidden = !state.configured;
+    $('settings-status').textContent = result.changed.length
+      ? `Saved. ${result.disconnected} user connection(s) were cleared.`
+      : 'Saved. Nothing changed.';
+  } catch (error) {
+    if (error instanceof ApiError && error.ui === 'auth') return sessionExpired(error.fullText);
+    fillError(errorBox, error);
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+async function testSettings() {
+  const status = $('settings-status');
+  clearError($('settings-error'));
+  status.textContent = 'Testing…';
+  try {
+    const result = await api('/api/admin/settings/test', { method: 'POST', csrf: true });
+    const parts = [];
+    parts.push(
+      result.reachable
+        ? `MCip reachable${result.api_version ? ` (API ${result.api_version})` : ''}.`
+        : `MCip not reachable: ${result.detail || 'no answer'}.`,
+    );
+    if (result.client_check === 'ok') {
+      parts.push(`Your key and the client key work (client: ${result.api_client || '?'}).`);
+    } else if (result.client_check === 'failed') {
+      parts.push(`Key check failed: ${result.client_error} — ${result.client_detail}`);
+    } else if (result.client_detail) {
+      parts.push(result.client_detail);
+    }
+    status.textContent = parts.join(' ');
+  } catch (error) {
+    status.textContent = '';
+    if (error instanceof ApiError && error.ui === 'auth') return sessionExpired(error.fullText);
+    fillError($('settings-error'), error);
   }
 }
 
@@ -317,6 +445,20 @@ function init() {
     submitConnect();
   });
 
+  $('form-settings').addEventListener('submit', (event) => {
+    event.preventDefault();
+    saveSettings();
+  });
+  $('settings-test').addEventListener('click', testSettings);
+  $('settings-button').addEventListener('click', () => {
+    state.settingsOpen = true;
+    route();
+  });
+  $('settings-close').addEventListener('click', () => {
+    state.settingsOpen = false;
+    route();
+  });
+
   $('signout-button').addEventListener('click', async () => {
     try {
       const payload = await api('/api/logout', { method: 'POST', csrf: true });
@@ -326,6 +468,7 @@ function init() {
     }
     state.user = null;
     state.connection = null;
+    state.settingsOpen = false;
     hideBanner();
     route();
   });
@@ -358,17 +501,23 @@ function init() {
   boot();
 }
 
+function applySession(session) {
+  state.csrfToken = session.csrf_token;
+  state.user = session.user;
+  state.connection = session.connection;
+  state.mcipHost = session.mcip_host || '';
+  state.configured = Boolean(session.configured);
+  state.allowRegister = session.allow_register;
+  $('connect-host').textContent = state.mcipHost || 'MCip';
+  $('connect-link').href = state.mcipHost
+    ? `https://${state.mcipHost}/user-settings/api-key`
+    : '#';
+  $('toggle-register').hidden = !state.allowRegister;
+}
+
 async function boot() {
   try {
-    const session = await api('/api/session');
-    state.csrfToken = session.csrf_token;
-    state.user = session.user;
-    state.connection = session.connection;
-    state.mcipHost = session.mcip_host;
-    state.allowRegister = session.allow_register;
-    $('connect-host').textContent = state.mcipHost || 'MCip';
-    $('connect-link').href = `https://${state.mcipHost}/user-settings/api-key`;
-    $('toggle-register').hidden = !state.allowRegister;
+    applySession(await api('/api/session'));
     showRegisterForm(false);
     route();
   } catch {

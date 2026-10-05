@@ -49,13 +49,21 @@ to the organisation whose workspaces the demo users chat in — see
 user then creates their own *External system* chat key in MCip and pastes it into the
 "Connect MCip" screen.
 
+**Two roles.** A **demo admin** sets the **MCip address** and the **API client
+key** (`ss_cli_…`, from the client's page in MCip) in **Settings**; a **common
+user** only signs in and connects their own MCip chat key. Changing either admin
+setting disconnects every user, so no stored key is ever sent to a different MCip
+or used for another client. Nothing about MCip is hard-coded: any organization's
+API client works.
+
 ### Option A — locally with uv (Python 3.12+)
 
 ```bash
 uv sync
-cp .env.example .env                 # set MCIP_BASE_URL + the two secrets below
-uv run python -m app.admin_cli add-user alice   # prints a password once
+cp .env.example .env                 # set the two secrets below
+uv run python -m app.admin_cli add-user admin --admin   # prints a password once
 uv run uvicorn app.main:app --port 8090
+# sign in as admin -> Settings: MCip address + API client key
 ```
 
 No uv? Create a venv, `pip install` the pinned dependencies from `pyproject.toml`,
@@ -64,9 +72,9 @@ then run the same two commands with that Python.
 ### Option B — Docker Compose
 
 ```bash
-cp .env.example .env                 # same three settings
+cp .env.example .env                 # the two secrets
 docker compose up -d --build
-docker compose exec demo python -m app.admin_cli add-user alice
+docker compose exec demo python -m app.admin_cli add-user admin --admin
 ```
 
 The image installs from `requirements.txt` — the frozen, hash-pinned export of
@@ -84,14 +92,26 @@ single Uvicorn worker: the rate limiter is an in-process, in-memory counter, so
 
 ### Configuration
 
-Everything is read from the environment (and `.env`, if present — real environment
-variables win). Only the first three are required:
+**In the GUI (demo admin → Settings),** stored in the database:
+
+| Setting | Purpose |
+|---|---|
+| MCip address | Your MCip deployment, e.g. `https://mcip.example.com` (no `/api/v1/ext` suffix). `https://` only; `http://` is accepted for localhost (or with `DEMO_ALLOW_INSECURE_MCIP=true`). **Test connection** checks it, and your own key plus the client key with `GET /me`. |
+| API client key | The `ss_cli_…` key MCip shows once when the API client is created or its key rotated. Sent as `X-MCip-Client-Key` on every MCip call. Stored Fernet-encrypted; only its prefix is ever shown. Optional while the MCip client doesn't require one. |
+
+Until an admin saves an address, admins land on Settings and common users see "Not
+set up yet".
+
+**In the environment** (and `.env`, if present — real environment variables win).
+Only the first two are required; they protect the database and sessions, so they
+deliberately stay out of the GUI:
 
 | Variable | Purpose |
 |---|---|
-| `MCIP_BASE_URL` | Your MCip deployment, e.g. `https://mcip.example.com` (no `/api/v1/ext` suffix — the demo appends it). |
 | `DEMO_ENCRYPTION_KEY` | Fernet key that encrypts stored MCip API keys at rest. Rotating it disconnects everyone. |
 | `DEMO_SESSION_SECRET` | Signs the demo's session cookies (32+ random characters). |
+| `MCIP_BASE_URL` | Optional first-run default for the MCip address, used until an admin saves one in Settings. |
+| `DEMO_ALLOW_INSECURE_MCIP` | `false` (default). `true` allows an `http://` MCip address for a non-local host (labs only). |
 | `DEMO_ALLOW_REGISTER` | `false` (default): accounts are created with the admin CLI. `true` opens self-registration. |
 | `DEMO_HTTPS_ONLY` | `true` when served over HTTPS: cookies get the `Secure` flag and HSTS is sent. |
 | `DEMO_TRUST_CF_HEADER` | `true` (default): client IPs are read from `CF-Connecting-IP`, which the documented Cloudflare-tunnel deployment guarantees. Set `false` if the port is ever reachable directly. |
@@ -102,7 +122,9 @@ variables win). Only the first three are required:
 Manage demo users where the database and `DEMO_ENCRYPTION_KEY` live:
 
 ```bash
-python -m app.admin_cli add-user alice [--password '…']
+python -m app.admin_cli add-user admin --admin   # a demo admin (Settings)
+python -m app.admin_cli add-user alice [--password '…']   # a common user
+python -m app.admin_cli set-admin alice [--revoke]
 python -m app.admin_cli list-users
 python -m app.admin_cli reset-password alice
 python -m app.admin_cli remove-user alice        # also drops their key + chats

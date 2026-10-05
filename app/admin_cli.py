@@ -2,8 +2,10 @@
 
 Run it where the demo's database and ``DEMO_ENCRYPTION_KEY`` live::
 
+    python -m app.admin_cli add-user admin --admin    # the first demo admin
     python -m app.admin_cli add-user alice            # generates a password
     python -m app.admin_cli add-user alice --password '<chosen>'
+    python -m app.admin_cli set-admin alice [--revoke]
     python -m app.admin_cli list-users
     python -m app.admin_cli reset-password alice
     python -m app.admin_cli remove-user alice
@@ -45,8 +47,9 @@ def cmd_add_user(store: Store, args: argparse.Namespace, out: TextIO) -> int:
         out.write(f"user '{args.username}' already exists\n")
         return 1
     password = args.password or generate_password()
-    store.create_user(args.username, password)
-    out.write(f"created user '{args.username}'\n")
+    store.create_user(args.username, password, is_admin=args.admin)
+    role = "admin" if args.admin else "user"
+    out.write(f"created {role} '{args.username}'\n")
     if args.password is None:
         out.write(f"password: {password}\n")
         out.write("(shown once — send it to the user; stored only as a hash)\n")
@@ -58,13 +61,16 @@ def cmd_list_users(store: Store, args: argparse.Namespace, out: TextIO) -> int:
     if not users:
         out.write("no users yet — add one with: python -m app.admin_cli add-user <name>\n")
         return 0
-    out.write(f"{'id':>4}  {'username':<24} {'connected':<9} {'workspace':<24} created\n")
+    out.write(
+        f"{'id':>4}  {'username':<24} {'role':<6} {'connected':<9} {'workspace':<24} created\n"
+    )
     for user in users:
         connection = store.get_connection(user["id"])
         connected = "yes" if connection else "no"
         workspace = (connection or {}).get("workspace_name") or "-"
+        role = "admin" if user.get("is_admin") else "user"
         out.write(
-            f"{user['id']:>4}  {user['username']:<24} {connected:<9} "
+            f"{user['id']:>4}  {user['username']:<24} {role:<6} {connected:<9} "
             f"{workspace:<24} {user['created_at']}\n"
         )
     return 0
@@ -89,6 +95,15 @@ def cmd_reset_password(store: Store, args: argparse.Namespace, out: TextIO) -> i
     return 0
 
 
+def cmd_set_admin(store: Store, args: argparse.Namespace, out: TextIO) -> int:
+    if not store.set_admin(args.username, not args.revoke):
+        out.write(f"no such user: '{args.username}'\n")
+        return 1
+    role = "a common user" if args.revoke else "a demo admin"
+    out.write(f"'{args.username}' is now {role}\n")
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="demo-admin", description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -100,7 +115,17 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         help="Use this password instead of a generated one.",
     )
+    add.add_argument(
+        "--admin",
+        action="store_true",
+        help="Make the user a demo admin (sets the MCip address and client key).",
+    )
     add.set_defaults(func=cmd_add_user)
+
+    admin = sub.add_parser("set-admin", help="Make a user a demo admin (or --revoke).")
+    admin.add_argument("username")
+    admin.add_argument("--revoke", action="store_true", help="Make them a common user again.")
+    admin.set_defaults(func=cmd_set_admin)
 
     listing = sub.add_parser("list-users", help="List demo users and connections.")
     listing.set_defaults(func=cmd_list_users)

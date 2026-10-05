@@ -1,8 +1,10 @@
 """Configuration: read `.env` (if present) then the process environment.
 
-The demo needs three settings to run (Guide §3): the MCip base URL, a Fernet
-key for stored MCip keys, and a secret for the session cookie. Everything else
-has a working default.
+Only two settings are required to start: a Fernet key for stored keys and a
+secret for the session cookie. The MCip base URL and the API client key are
+**admin settings in the GUI** (stored in the database); ``MCIP_BASE_URL`` here
+is only a first-run default until an admin saves one. Everything else has a
+working default.
 """
 
 from __future__ import annotations
@@ -60,6 +62,8 @@ class Settings:
     trust_cf_header: bool
     login_rate_per_minute: int
     chat_rate_per_minute: int
+    #: Allow an ``http://`` MCip base URL for a non-local host (tests, labs).
+    allow_insecure_mcip: bool = False
 
     @property
     def mcip_host(self) -> str:
@@ -70,15 +74,11 @@ def load_settings(*, require_mcip: bool = True) -> Settings:
     """Build settings from the environment.
 
     ``require_mcip=False`` is for the admin CLI, which only needs the database
-    and the encryption key.
+    and the encryption key. ``MCIP_BASE_URL`` is optional either way: an admin
+    sets the MCip base URL in the GUI.
     """
     load_dotenv()
     base_url = os.environ.get("MCIP_BASE_URL", "").strip().rstrip("/")
-    if require_mcip and not base_url:
-        raise SystemExit(
-            "MCIP_BASE_URL is not set. Copy .env.example to .env and set it to "
-            "your deployment, e.g. https://mcip.example.com"
-        )
     encryption_key = os.environ.get("DEMO_ENCRYPTION_KEY", "").strip()
     if not encryption_key:
         raise SystemExit(
@@ -106,4 +106,5 @@ def load_settings(*, require_mcip: bool = True) -> Settings:
         trust_cf_header=_flag("DEMO_TRUST_CF_HEADER", True),
         login_rate_per_minute=_int("DEMO_LOGIN_RATE_PER_MIN", 5),
         chat_rate_per_minute=_int("DEMO_CHAT_RATE_PER_MIN", 20),
+        allow_insecure_mcip=_flag("DEMO_ALLOW_INSECURE_MCIP", False),
     )
