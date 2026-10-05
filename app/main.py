@@ -457,6 +457,11 @@ def create_app(
             "Permissions-Policy", "camera=(), microphone=(), geolocation=()"
         )
         response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+        if request.url.path.startswith("/static/"):
+            # Revalidate every load (ETag/Last-Modified make that a cheap 304):
+            # without an explicit header, Cloudflare caches for 4 h, and after a
+            # deploy browsers would mix the new index.html with an old app.js.
+            response.headers.setdefault("Cache-Control", "no-cache")
         if settings.https_only:
             response.headers.setdefault(
                 "Strict-Transport-Security", "max-age=31536000; includeSubDomains"

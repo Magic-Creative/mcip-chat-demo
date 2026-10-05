@@ -309,3 +309,12 @@ async def test_static_javascript_is_served_as_javascript(session: DemoSession) -
         response = await session.client.get(path)
         assert response.status_code == 200, path
         assert response.headers["content-type"].startswith("text/javascript"), path
+
+
+async def test_static_files_must_be_revalidated(session: DemoSession) -> None:
+    """After a deploy the browser must not keep an old app.js (Cloudflare 4 h TTL)."""
+    response = await session.client.get("/static/app.js")
+    assert response.headers["cache-control"] == "no-cache"
+    assert response.headers.get("etag")
+    page = await session.client.get("/")
+    assert page.headers["cache-control"] == "no-store"
