@@ -346,6 +346,11 @@ textarea {
   font-weight: 400;
 }
 
+.stack label.inline input {
+  width: auto;
+  flex: none;
+}
+
 .row {
   display: flex;
   flex-wrap: wrap;
