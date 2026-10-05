@@ -16,13 +16,12 @@ Your user ──► Your GUI ──► Your backend ── looks up this user's 
 
 ## 2. Onboarding
 
-1. **An admin registers your system as an API client.** A system admin does this at **Admin → API clients** (`/admin/api-clients`), or an organization owner does it at **Organization settings → API clients** (`/org/<slug>/settings/api-clients`). The admin can restrict the client to some workspaces and IP ranges, and sets its limits. Ask the admin for the client's **name**; your users will pick it.
-2. **A workspace admin turns on "API key access"** in the workspace settings of every workspace your users will chat in. It is off by default; without it you get `403 API_ACCESS_DISABLED`.
-3. **Each user creates a key** at `/user-settings/api-key` → **Create API key**:
+1. **An admin registers your system as an API client.** A system admin does this at **Admin → API clients** (`/admin/api-clients`), or an organization owner does it at **Organization settings → API clients** (`/org/<slug>/settings/api-clients`). Every API client belongs to an organization — keys of the client can only reach that organization's workspaces — and the admin can pin IP ranges and set its limits. Ask the admin for the client's **name** and its **organization**; your users will pick the client.
+2. **Each user creates a key** at `/user-settings/api-key` → **Create API key**:
    - **Use for:** `External system: <your client name>`. This makes a *chat* key: it only works on `/api/v1/ext/*`, and only for your client.
    - **Expires in days (required):** default 90, maximum 365 (or less if the deployment sets `PAT_MAX_EXPIRY_DAYS`).
    - The key (`ss_pat_…`) is shown **once**. The user pastes it into your "Connect MCip" setting.
-4. **You validate and store it.** Call `GET /api/v1/ext/me` with the key, show the user who they are connected as, let them pick a workspace from `workspaces`, and store the key as described in §11. Store `key.expires_at` too, so you can ask for a new key before it expires.
+3. **You validate and store it.** Call `GET /api/v1/ext/me` with the key, show the user who they are connected as, let them pick a workspace from `workspaces`, and store the key as described in §11. Store `key.expires_at` too, so you can ask for a new key before it expires.
 
 A full-access key ("MCip API (full access)") does **not** work here: it gets `403 API_KEY_SCOPE`.
 
@@ -56,7 +55,7 @@ Authorization: Bearer ss_pat_…
 }
 ```
 
-`workspaces` are the ones this key may use: the user is a member, API access is on, the workspace is in the client's allowed list (if the admin set one), and for an organization's client it belongs to that organization. An empty list means nothing is usable yet (usually API access is off).
+`workspaces` are the ones this key may use: the user is a member with the chat permission, and the workspace belongs to the client's organization. An empty list means nothing is usable (usually the user is no longer in the client's organization).
 
 ### 4.2 `POST /chat`: one turn
 
@@ -194,15 +193,15 @@ Some add fields: `retry_after_ms` (429, 409 busy) and `continue_url` (409 awaiti
 |---|---|---|---|
 | 400 | `PROMPT_REFUSED` | The prompt-injection guard refused the message (JSON mode; in stream mode it is an `error` event). | Show `message`; let the user rephrase. Don't retry as is. |
 | 401 | `API_KEY_MISSING` | No `Authorization: Bearer ss_pat_…` header. | Fix the integration. |
-| 401 | `API_KEY_INVALID` | Unknown, revoked or deleted key (also: its API client was deleted). | Mark the user disconnected; ask them to reconnect with a new key. |
+| 401 | `API_KEY_INVALID` | Unknown, revoked or deleted key: revoked by the user, or by an org/system admin from the client's **Keys** panel (also: its API client was deleted). | Mark the user disconnected; ask them to reconnect with a new key. |
 | 401 | `API_KEY_EXPIRED` | The key passed `expires_at`. | Ask the user to create a new key. |
 | 401 | `API_USER_INACTIVE` | The MCip user is deactivated. | Stop using the key; disconnect the user. |
 | 403 | `API_KEY_SCOPE` | Not a chat key (e.g. a full-access key). | Ask the user for an "External system" key. |
 | 403 | `API_CLIENT_DISABLED` | An admin disabled your API client (kill switch). | Stop sending; contact the MCip admin. Affects every user. |
 | 403 | `API_CLIENT_NOT_ALLOWED` | The key's user left the organization that owns your client. | Disconnect the user; contact the MCip admin if unexpected. |
 | 403 | `API_CLIENT_IP_DENIED` | Your egress IP is not on the client's allowlist. | Give the MCip admin your egress IPs. |
-| 403 | `API_ACCESS_DISABLED` | The workspace has "API key access" off. | Ask a workspace admin to turn it on. |
-| 403 | `WORKSPACE_FORBIDDEN` | Not a member, not an allowed workspace for the client, another org's workspace, or the workspace doesn't exist. | Re-read `GET /me` and let the user pick again. |
+| 403 | `API_ACCESS_DISABLED` | Reserved. Older MCip releases sent this when the workspace had "API key access" off; current ones never do — treat it like `WORKSPACE_FORBIDDEN` if you see it. | Re-read `GET /me` and let the user pick again. |
+| 403 | `WORKSPACE_FORBIDDEN` | Not a member, the workspace is another org's (or personal), or the workspace doesn't exist. | Re-read `GET /me` and let the user pick again. |
 | 403 | `FORBIDDEN` | The user's workspace role lacks the chat permission (create/read/delete chats). | Ask a workspace admin to change the role. |
 | 404 | `CONVERSATION_NOT_FOUND` | Unknown conversation, another user's, or another workspace's. | Start a new conversation (`conversation_id: null`). |
 | 409 | `CONVERSATION_BUSY` | A turn is still running on this conversation, or a request with the same `client_request_id` is still running. | Wait `retry_after_ms` (or `Retry-After`) and retry with the same `client_request_id`. |
@@ -313,7 +312,7 @@ The answer is markdown and cites sources as `[1]`, `[2]`, …. Each `citation` (
 - **One key per user, one user per key.** MCip treats the key holder as that user (their documents, their credits, their actions). Never share a key between users or use one user's key for another.
 - Keys are bound to your API client; they won't work for another system, and they only reach `/api/v1/ext/*`.
 - Keys expire (max 365 days). Read `key.expires_at` from `GET /me` and ask the user for a new key before then. On `401` (`API_KEY_INVALID`, `API_KEY_EXPIRED`, `API_USER_INACTIVE`) mark the user disconnected and stop using the key.
-- The user can revoke a key at any time (`/user-settings/api-key` → delete); it stops working on the next request.
+- The user can revoke a key at any time (`/user-settings/api-key` → delete). An organization owner (or a system admin) can also revoke it from the API client's **Keys** panel (**Organization settings → API clients → <client> → Keys**). Either way it stops working on the next request with `401 API_KEY_INVALID`; disconnect the user and ask for a new key.
 - If you suspect a leak, tell the user (and the MCip admin) to delete the key at once.
 
 ## 12. Limits
@@ -357,7 +356,7 @@ curl -N https://mcip.example.com/api/v1/ext/chat \
 
 **Can we use one service key for all our users?** No. Every request must carry the key of the MCip user it acts for; MCip has no service accounts for chat.
 
-**Our user gets `403 API_ACCESS_DISABLED` / an empty `workspaces` list.** A workspace admin must turn on "API key access" in that workspace's settings, and the workspace must be allowed for your API client.
+**Our user gets an empty `workspaces` list / `403 WORKSPACE_FORBIDDEN`.** The user is not in your API client's organization (every client is org-bound), or none of that organization's workspaces gives them the chat permission. An admin checks the client's organization under **Admin → API clients**. If you ever see the reserved `API_ACCESS_DISABLED` code, the deployment is an older MCip release: a workspace admin must turn on "API key access" there.
 
 **Why does a retry with `stream: true` return JSON?** The first request with that `client_request_id` completed; you get its stored result (§8). Always branch on `Content-Type`.
 
@@ -365,7 +364,7 @@ curl -N https://mcip.example.com/api/v1/ext/chat \
 
 **Can the user continue the conversation in MCip?** Yes. It is a normal private thread in their chat history ("via <client>"). Turns made there show up in the transcript endpoint.
 
-**Where are the credits charged?** Like a UI chat: an organization workspace charges the organization wallet, a personal workspace its owner. `usage.credits_micros` reports the turn's cost.
+**Where are the credits charged?** Like a UI chat: an organization workspace charges the organization wallet. `usage.credits_micros` reports the turn's cost.
 
 **What happens if our backend restarts mid-stream?** The turn stops. Retry with the same `client_request_id`: if the turn had completed you get its result; otherwise it runs again.
 

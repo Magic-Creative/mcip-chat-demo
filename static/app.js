@@ -171,8 +171,8 @@ function showWorkspacePicker(error) {
     const item = document.createElement('li');
     item.className = 'muted';
     item.textContent =
-      'This key can not use any workspace yet. A workspace admin must enable ' +
-      '"API key access" in the workspace settings.';
+      'This key can not use any workspace yet. The user must be in the API ' +
+      "client's organization, with chat access to one of its workspaces.";
     list.append(item);
   }
   for (const workspace of workspaces) {

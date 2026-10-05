@@ -97,8 +97,11 @@ ADVICE: dict[str, str] = {
     "API_CLIENT_DISABLED": "The API client is disabled. Contact the MCip admin.",
     "API_CLIENT_NOT_ALLOWED": "You left the client's organization. Contact the MCip admin.",
     "API_CLIENT_IP_DENIED": "This server's IP is not on the client's allowlist.",
+    # Reserved: current MCip servers never emit this; older releases sent it
+    # when a workspace's API-access toggle (since removed) was off.
     "API_ACCESS_DISABLED": (
-        "A workspace admin must turn on 'API key access' in the workspace settings."
+        "This MCip server is an older release: a workspace admin must turn on "
+        "'API key access' for this workspace."
     ),
     "WORKSPACE_FORBIDDEN": "Pick a workspace from the list your key can use.",
     "FORBIDDEN": "Your workspace role does not allow this. Ask a workspace admin.",
