@@ -146,6 +146,9 @@ class ChatStream:
         return "text/event-stream" not in self.content_type
 
 
+CLIENT_KEY_HEADER = "X-MCip-Client-Key"
+
+
 class McipClient:
     """One instance per request; carries exactly one user's key."""
 
@@ -154,13 +157,18 @@ class McipClient:
         base_url: str,
         api_key: str,
         *,
+        client_key: str | None = None,
         timeout_s: float = DEFAULT_TIMEOUT_S,
         transport: httpx.AsyncBaseTransport | None = None,
     ):
         self._timeout = httpx.Timeout(timeout_s, connect=10.0)
+        headers = {"Authorization": f"Bearer {api_key}"}
+        if client_key:
+            # Authenticates the external system itself (MCip API client key).
+            headers[CLIENT_KEY_HEADER] = client_key
         self._http = httpx.AsyncClient(
             base_url=base_url.rstrip("/") + API_PREFIX,
-            headers={"Authorization": f"Bearer {api_key}"},
+            headers=headers,
             timeout=self._timeout,
             transport=transport,
         )

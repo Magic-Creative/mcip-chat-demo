@@ -17,7 +17,7 @@ you add**, so treat the hostname as sensitive:
 - the Access application below is deliberately broad (Allow → Everyone with an
   email one-time PIN): it hides the site from scanners, and the demo's own
   account login is the real gate. Give each person their own demo account
-  (`demo-admin add-user`); never share logins, and never reuse an MCip key
+  (`demo-admin add-user`; admins with `--admin`); never share logins, and never reuse an MCip key
   across accounts.
 
 ## 1. Prepare the demo
@@ -44,12 +44,14 @@ you add**, so treat the hostname as sensitive:
 cd mcip-chat-demo
 cp .env.example .env
 # edit .env:
-#   MCIP_BASE_URL=https://<your-mcip-host>
+#   (MCip address and API client key are set in the GUI: Settings)
 #   DEMO_ENCRYPTION_KEY=<python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())">
 #   DEMO_SESSION_SECRET=<python -c "import secrets; print(secrets.token_urlsafe(48))">
 #   DEMO_HTTPS_ONLY=true
 docker compose up -d --build
-docker compose exec demo python -m app.admin_cli add-user alice
+docker compose exec demo python -m app.admin_cli add-user admin --admin
+# then sign in as admin -> Settings: MCip address + API client key (ss_cli_…),
+# add common users with: python -m app.admin_cli add-user alice
 curl -fsS http://127.0.0.1:8090/healthz   # {"status":"ok"}
 ```
 

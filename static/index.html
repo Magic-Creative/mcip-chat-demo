@@ -32,6 +32,7 @@
               fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
       </svg>
     </button>
+    <button id="settings-button" class="button ghost" type="button" hidden>Settings</button>
     <button id="signout-button" class="button ghost" type="button" hidden>Sign out</button>
   </header>
 
@@ -79,6 +80,59 @@
           <button id="toggle-register" class="link" type="button" hidden>
             Create an account
           </button>
+        </p>
+      </div>
+    </section>
+
+    <!-- Not configured yet (common users) -->
+    <section id="view-unconfigured" class="view centered" hidden>
+      <div class="card">
+        <h2>Not set up yet</h2>
+        <p class="muted">
+          A demo admin has not set the MCip address yet. Try again once they
+          have finished the setup.
+        </p>
+      </div>
+    </section>
+
+    <!-- Admin settings -->
+    <section id="view-settings" class="view centered" hidden>
+      <div class="card wide">
+        <h2>Settings</h2>
+        <p class="muted">
+          Only demo admins see this page. Changing the MCip address or the
+          client key <strong>disconnects every user</strong>: each user then
+          connects their own key again.
+        </p>
+        <form id="form-settings" class="stack" novalidate>
+          <label for="settings-url">MCip address (base URL)</label>
+          <input id="settings-url" name="mcip_base_url" type="url" inputmode="url"
+                 autocomplete="off" spellcheck="false"
+                 placeholder="https://mcip.example.com" aria-describedby="settings-url-hint">
+          <p id="settings-url-hint" class="muted small"></p>
+
+          <label for="settings-client-key">API client key</label>
+          <input id="settings-client-key" name="client_key" type="password"
+                 autocomplete="off" spellcheck="false" placeholder="ss_cli_"
+                 aria-describedby="settings-key-hint">
+          <p id="settings-key-hint" class="muted small"></p>
+          <label class="inline">
+            <input id="settings-clear-key" type="checkbox"> Remove the stored client key
+          </label>
+
+          <p id="settings-error" class="field-error" role="alert" hidden></p>
+          <p id="settings-status" class="muted small" role="status" aria-live="polite"></p>
+          <div class="row">
+            <button id="settings-save" class="button primary" type="submit">Save</button>
+            <button id="settings-test" class="button" type="button">Test connection</button>
+            <button id="settings-close" class="button ghost" type="button">Back</button>
+          </div>
+        </form>
+        <p class="muted small">
+          The client key comes from MCip: <em>Admin → API clients</em> or
+          <em>Organization settings → API clients</em>, shown once when the
+          client is created or its key is rotated. It is stored encrypted and
+          only its first 16 characters are ever shown here.
         </p>
       </div>
     </section>

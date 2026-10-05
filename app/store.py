@@ -7,8 +7,9 @@ Key-handling rules from the guide (§11) that this module implements:
 * only the key's 16-character prefix is ever stored in clear text or logged;
 * a disconnect on 401 is a delete of the stored ciphertext.
 
-Schema (four tables): ``users``, ``mcip_connections``, ``conversations`` and
-``turn_requests``.
+Schema (five tables): ``users``, ``mcip_connections``, ``conversations``,
+``turn_requests`` and ``app_settings`` (admin settings: MCip base URL and the
+API client key, the latter Fernet-encrypted like user keys).
 """
 
 from __future__ import annotations
@@ -31,7 +32,8 @@ CREATE TABLE IF NOT EXISTS users (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     username      TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
-    created_at    TEXT NOT NULL
+    created_at    TEXT NOT NULL,
+    is_admin      INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS mcip_connections (
@@ -70,10 +72,23 @@ CREATE TABLE IF NOT EXISTS turn_requests (
     created_at           TEXT NOT NULL,
     PRIMARY KEY (user_id, client_request_id)
 );
+
+-- Admin settings (name -> value). Secret values are stored as Fernet tokens.
+CREATE TABLE IF NOT EXISTS app_settings (
+    name       TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    updated_by TEXT
+);
 """
 
+#: Setting names (``app_settings.name``).
+SETTING_BASE_URL = "mcip_base_url"
+SETTING_CLIENT_KEY = "mcip_client_key"  # Fernet token of the ``ss_cli_…`` key
+SETTING_CLIENT_KEY_PREFIX = "mcip_client_key_prefix"
+
 #: ``ss_pat_…`` keys anywhere in a string; used by :func:`redact` for logs.
-KEY_PATTERN = re.compile(r"ss_pat_[A-Za-z0-9_\-]+")
+KEY_PATTERN = re.compile(r"ss_(pat|cli)_[A-Za-z0-9_\-]+")
 #: The prefix MCip shows for a key (``GET /me`` → ``key.prefix``).
 KEY_PREFIX_LENGTH = 16
 #: How long a turn's first-attempt conversation param stays on record. MCip
@@ -108,8 +123,9 @@ def key_prefix(key: str) -> str:
 
 
 def redact(text: str) -> str:
-    """Replace full keys with ``ss_pat_[redacted]`` — for logs and errors."""
-    return KEY_PATTERN.sub("ss_pat_[redacted]", text)
+    """Replace full keys with ``ss_pat_[redacted]`` (or ``ss_cli_…``) — for
+    logs and errors."""
+    return KEY_PATTERN.sub(lambda m: f"ss_{m.group(1)}_[redacted]", text)
 
 
 def iso_or_none(value: str | None) -> str | None:
@@ -143,16 +159,37 @@ class Store:
         with self._init_lock, self._connect() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(SCHEMA)
+            # Databases created before the admin role: add the column in place.
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)")}
+            if "is_admin" not in columns:
+                connection.execute(
+                    "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"
+                )
 
     # -- users ---------------------------------------------------------------
 
-    def create_user(self, username: str, password: str) -> int:
+    def create_user(self, username: str, password: str, *, is_admin: bool = False) -> int:
         with self._connect() as connection:
             cursor = connection.execute(
-                "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
-                (username, hash_password(password), now_iso()),
+                "INSERT INTO users (username, password_hash, created_at, is_admin) "
+                "VALUES (?, ?, ?, ?)",
+                (username, hash_password(password), now_iso(), int(is_admin)),
             )
             return int(cursor.lastrowid)
+
+    def set_admin(self, username: str, is_admin: bool) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE users SET is_admin = ? WHERE username = ?", (int(is_admin), username)
+            )
+            return cursor.rowcount > 0
+
+    def is_admin(self, user_id: int) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT is_admin FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+        return bool(row and row["is_admin"])
 
     def get_user(self, username: str) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -169,7 +206,7 @@ class Store:
     def list_users(self) -> list[dict[str, Any]]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT id, username, created_at FROM users ORDER BY id"
+                "SELECT id, username, created_at, is_admin FROM users ORDER BY id"
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -281,6 +318,62 @@ class Store:
                 "DELETE FROM mcip_connections WHERE user_id = ?", (user_id,)
             )
             return cursor.rowcount > 0
+
+    def delete_all_connections(self) -> int:
+        """Forget every stored user key (the MCip base URL or client changed)."""
+        with self._connect() as connection:
+            cursor = connection.execute("DELETE FROM mcip_connections")
+            return cursor.rowcount
+
+    # -- admin settings ------------------------------------------------------
+
+    def get_settings(self) -> dict[str, dict[str, Any]]:
+        """Every stored setting row, secret values still encrypted."""
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM app_settings").fetchall()
+        return {row["name"]: dict(row) for row in rows}
+
+    def get_setting(self, name: str) -> str | None:
+        row = self.get_settings().get(name)
+        return row["value"] if row else None
+
+    def set_setting(self, name: str, value: str | None, *, updated_by: str | None) -> None:
+        """Store a setting; ``None`` deletes it."""
+        with self._connect() as connection:
+            if value is None:
+                connection.execute("DELETE FROM app_settings WHERE name = ?", (name,))
+                return
+            connection.execute(
+                """
+                INSERT INTO app_settings (name, value, updated_at, updated_by)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at,
+                    updated_by = excluded.updated_by
+                """,
+                (name, value, now_iso(), updated_by),
+            )
+
+    def set_client_key(self, key: str | None, *, updated_by: str | None) -> None:
+        """Store the API client key encrypted (``None`` clears it)."""
+        if key is None:
+            self.set_setting(SETTING_CLIENT_KEY, None, updated_by=updated_by)
+            self.set_setting(SETTING_CLIENT_KEY_PREFIX, None, updated_by=updated_by)
+            return
+        token = self._fernet.encrypt(key.encode()).decode()
+        self.set_setting(SETTING_CLIENT_KEY, token, updated_by=updated_by)
+        self.set_setting(SETTING_CLIENT_KEY_PREFIX, key_prefix(key), updated_by=updated_by)
+
+    def get_client_key(self) -> str | None:
+        """Decrypt the client key for an outgoing request — the only reader."""
+        token = self.get_setting(SETTING_CLIENT_KEY)
+        if not token:
+            return None
+        try:
+            return self._fernet.decrypt(token.encode()).decode()
+        except InvalidToken:
+            return None
 
     # -- conversations -------------------------------------------------------
 

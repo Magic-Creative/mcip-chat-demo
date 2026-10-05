@@ -29,13 +29,14 @@ A full-access key ("MCip API (full access)") does **not** work here: it gets `40
 
 - Base URL: `https://<mcip-host>/api/v1/ext`
 - OpenAPI document (public, no auth): `GET /api/v1/ext/openapi.json`; Swagger UI: `GET /api/v1/ext/docs`. They describe only the external routes and every event model.
-- Every other request carries exactly one credential header:
+- Every other request carries the user's key, and — when your API client has a client key — the client key:
 
 ```
-Authorization: Bearer ss_pat_<…>
+Authorization: Bearer ss_pat_<…>        # the user (who acts)
+X-MCip-Client-Key: ss_cli_<…>           # your system (the API client)
 ```
 
-No cookie, JWT or other identity header is accepted or needed. Every response carries `X-Request-ID`; quote it (or the body's `request_id`) when you report a problem. You may send your own `X-Request-ID`, and MCip will use it.
+The **client key** authenticates your external system itself (MCip releases with API client keys; older releases ignore the header). MCip shows it once when an admin creates the API client or rotates its key (**Admin → API clients** / **Organization settings → API clients**); store it like a password on your backend, never in a browser. A rotated key keeps working for 24 hours so you can switch without downtime. While the client doesn't *require* a client key, you may omit the header, but a wrong one is always rejected. No cookie, JWT or other identity header is accepted or needed. Every response carries `X-Request-ID`; quote it (or the body's `request_id`) when you report a problem. You may send your own `X-Request-ID`, and MCip will use it.
 
 ## 4. Endpoints
 
@@ -193,6 +194,8 @@ Some add fields: `retry_after_ms` (429, 409 busy) and `continue_url` (409 awaiti
 |---|---|---|---|
 | 400 | `PROMPT_REFUSED` | The prompt-injection guard refused the message (JSON mode; in stream mode it is an `error` event). | Show `message`; let the user rephrase. Don't retry as is. |
 | 401 | `API_KEY_MISSING` | No `Authorization: Bearer ss_pat_…` header. | Fix the integration. |
+| 401 | `CLIENT_KEY_MISSING` | The API client requires a client key and `X-MCip-Client-Key` is missing. | Configure your client key. Affects every user. |
+| 401 | `CLIENT_KEY_INVALID` | The client key is unknown, revoked, past its 24 h rotation grace, or belongs to another client. | Get the current key from the MCip admin. Don't disconnect the user: their key is fine. |
 | 401 | `API_KEY_INVALID` | Unknown, revoked or deleted key: revoked by the user, or by an org/system admin from the client's **Keys** panel (also: its API client was deleted). | Mark the user disconnected; ask them to reconnect with a new key. |
 | 401 | `API_KEY_EXPIRED` | The key passed `expires_at`. | Ask the user to create a new key. |
 | 401 | `API_USER_INACTIVE` | The MCip user is deactivated. | Stop using the key; disconnect the user. |

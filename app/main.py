@@ -2,12 +2,18 @@
 
 The browser only ever talks to this app (never to MCip): the routes below are
 the demo's own API, and every MCip call happens server-side with the signed-in
-user's own key (Guide §1, §11).
+user's own key (Guide §1, §11), plus the API client key an admin configured.
+
+Two roles: a **demo admin** sets the MCip base URL and the API client key in
+Settings (``/api/admin/settings``); a **common user** signs in and connects
+their own MCip chat key. Changing either admin setting disconnects every user,
+so no stored key is ever sent to a different MCip or used for another client.
 
 Security posture (Guide §11, and "Public-exposure safeguards" in the issue):
 
-* keys are write-only — they go in through ``POST /api/connection`` and are
-  never part of any response, URL or log line;
+* keys are write-only — user keys go in through ``POST /api/connection`` and
+  the client key through ``PUT /api/admin/settings``; neither is ever part of
+  a response (only the prefix), URL or log line;
 * the session is an HttpOnly, SameSite=Lax signed cookie; state-changing
   routes require a double-submit CSRF token (header + cookie + session);
 * responses carry a strict CSP (``default-src 'self'``, no inline code), so
@@ -43,7 +49,14 @@ from app.config import Settings, load_settings
 from app.errors import DemoError
 from app.mcip import ExtApiError, McipClient
 from app.relay import relay_turn, translate_ext_error
-from app.store import Store, key_prefix, redact, verify_password
+from app.store import (
+    SETTING_BASE_URL,
+    SETTING_CLIENT_KEY_PREFIX,
+    Store,
+    key_prefix,
+    redact,
+    verify_password,
+)
 
 logger = logging.getLogger("demo")
 
@@ -51,6 +64,10 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 USERNAME_PATTERN = r"^[a-z0-9][a-z0-9_.\-]{2,31}$"
 MIN_PASSWORD_LENGTH = 8
 COOKIE_MAX_AGE = 14 * 24 * 3600
+#: Hosts where an ``http://`` MCip base URL is accepted without the opt-in.
+LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+#: Where the admin "Test connection" looks for MCip (public, no auth).
+OPENAPI_PATH = "/api/v1/ext/openapi.json"
 
 CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
@@ -81,6 +98,15 @@ class RegisterRequest(BaseModel):
         if not re.fullmatch(USERNAME_PATTERN, value):
             raise ValueError("Use 3-32 characters: a-z, 0-9, dot, dash, underscore.")
         return value
+
+
+class SettingsUpdate(BaseModel):
+    """Admin settings. Omitted fields stay unchanged."""
+
+    mcip_base_url: str | None = Field(default=None, min_length=1, max_length=512)
+    #: The API client key (``ss_cli_…``); write-only, like user keys.
+    client_key: str | None = Field(default=None, min_length=1, max_length=256)
+    clear_client_key: bool = False
 
 
 class ConnectRequest(BaseModel):
@@ -301,14 +327,76 @@ def create_app(
             "connected_at": connection.get("connected_at"),
         }
 
-    def mcip_client(key: str) -> McipClient:
-        return McipClient(settings.mcip_base_url, key, transport=mcip_transport)
+    async def current_base_url() -> str:
+        """The admin-set MCip base URL, else the ``MCIP_BASE_URL`` default."""
+        stored = await asyncio.to_thread(store.get_setting, SETTING_BASE_URL)
+        return (stored or settings.mcip_base_url or "").rstrip("/")
+
+    async def mcip_client(key: str) -> McipClient:
+        base_url = await current_base_url()
+        if not base_url:
+            raise api_error(
+                503, "DEMO_NOT_CONFIGURED", "The demo admin has not set the MCip address yet."
+            )
+        client_key = await asyncio.to_thread(store.get_client_key)
+        return McipClient(base_url, key, client_key=client_key, transport=mcip_transport)
 
     async def open_mcip(user_id: int) -> McipClient:
         key = await asyncio.to_thread(store.get_api_key, user_id)
         if not key:
             raise api_error(401, "NOT_CONNECTED", "Connect your MCip key first.")
-        return mcip_client(key)
+        return await mcip_client(key)
+
+    async def require_admin(request: Request) -> int:
+        user_id = await require_user(request)
+        if not await asyncio.to_thread(store.is_admin, user_id):
+            raise api_error(403, "DEMO_FORBIDDEN", "Only a demo admin can do this.")
+        return user_id
+
+    def normalize_base_url(raw: str) -> str:
+        value = raw.strip().rstrip("/")
+        parts = urlsplit(value)
+        if (
+            parts.scheme not in {"http", "https"}
+            or not parts.hostname
+            or parts.username
+            or parts.password
+            or parts.query
+            or parts.fragment
+        ):
+            raise api_error(
+                400, "DEMO_BAD_URL", "Enter the MCip address, e.g. https://mcip.example.com"
+            )
+        if (
+            parts.scheme == "http"
+            and parts.hostname not in LOCAL_HOSTS
+            and not settings.allow_insecure_mcip
+        ):
+            raise api_error(
+                400, "DEMO_BAD_URL", "Use https:// (http:// is only allowed for localhost)."
+            )
+        return value
+
+    async def settings_view() -> dict[str, Any]:
+        """Admin settings as the browser may see them — never the client key."""
+        rows = await asyncio.to_thread(store.get_settings)
+        base = rows.get(SETTING_BASE_URL)
+        prefix = rows.get(SETTING_CLIENT_KEY_PREFIX)
+        if base:
+            base_url, source = base["value"], "settings"
+        elif settings.mcip_base_url:
+            base_url, source = settings.mcip_base_url, "env"
+        else:
+            base_url, source = None, None
+        return {
+            "mcip_base_url": base_url,
+            "mcip_base_url_source": source,
+            "mcip_base_url_updated_at": base["updated_at"] if base else None,
+            "mcip_base_url_updated_by": base["updated_by"] if base else None,
+            "client_key_prefix": prefix["value"] if prefix else None,
+            "client_key_updated_at": prefix["updated_at"] if prefix else None,
+            "client_key_updated_by": prefix["updated_by"] if prefix else None,
+        }
 
     # -- error handling -----------------------------------------------------
 
@@ -386,9 +474,11 @@ def create_app(
     async def get_session(request: Request) -> JSONResponse:
         """Boot payload: who is signed in, the CSRF token, and where MCip is."""
         user_id = user_id_of(request)
+        base_url = await current_base_url()
         body: dict[str, Any] = {
             "allow_register": settings.allow_register,
-            "mcip_host": urlsplit(settings.mcip_base_url).netloc or settings.mcip_base_url,
+            "configured": bool(base_url),
+            "mcip_host": (urlsplit(base_url).netloc or base_url) if base_url else None,
             "user": None,
             "connection": None,
         }
@@ -397,7 +487,7 @@ def create_app(
             if user is None:
                 request.session.clear()
             else:
-                body["user"] = {"username": user["username"]}
+                body["user"] = {"username": user["username"], "is_admin": bool(user["is_admin"])}
                 body["connection"] = connection_view(
                     await asyncio.to_thread(store.get_connection, user_id)
                 )
@@ -424,7 +514,9 @@ def create_app(
         request.session.clear()
         request.session["user_id"] = user_id
         token = issue_csrf(request, rotate=True)
-        response = JSONResponse({"user": {"username": payload.username}, "csrf_token": token})
+        response = JSONResponse(
+            {"user": {"username": payload.username, "is_admin": False}, "csrf_token": token}
+        )
         attach_csrf_cookie(response, token)
         return response
 
@@ -442,7 +534,12 @@ def create_app(
         request.session.clear()
         request.session["user_id"] = int(user["id"])
         token = issue_csrf(request, rotate=True)
-        response = JSONResponse({"user": {"username": user["username"]}, "csrf_token": token})
+        response = JSONResponse(
+            {
+                "user": {"username": user["username"], "is_admin": bool(user["is_admin"])},
+                "csrf_token": token,
+            }
+        )
         attach_csrf_cookie(response, token)
         return response
 
@@ -470,7 +567,7 @@ def create_app(
             raise api_error(
                 400, "DEMO_KEY_FORMAT", "That does not look like an MCip API key (ss_pat_...)."
             )
-        async with mcip_client(key) as mcip:
+        async with await mcip_client(key) as mcip:
             try:
                 me = await mcip.me()
             except ExtApiError as exc:
@@ -516,6 +613,98 @@ def create_app(
         )
         connection = await asyncio.to_thread(store.get_connection, user_id)
         return {"connection": connection_view(connection)}
+
+    # -- admin settings (demo admins only) ----------------------------------
+
+    @app.get("/api/admin/settings")
+    async def get_admin_settings(admin_id: int = Depends(require_admin)) -> dict[str, Any]:
+        return {"settings": await settings_view()}
+
+    @app.put("/api/admin/settings", dependencies=[Depends(require_csrf)])
+    async def update_admin_settings(
+        payload: SettingsUpdate, admin_id: int = Depends(require_admin)
+    ) -> dict[str, Any]:
+        """Save the MCip base URL and/or the API client key.
+
+        A real change to either disconnects every user: their keys belong to
+        one MCip deployment and one API client, so they must reconnect.
+        """
+        admin = await asyncio.to_thread(store.get_user_by_id, admin_id)
+        by = admin["username"] if admin else None
+        if payload.client_key is not None and payload.clear_client_key:
+            raise api_error(400, "VALIDATION_ERROR", "Set a new client key or clear it, not both.")
+        changed: list[str] = []
+        if payload.mcip_base_url is not None:
+            new_url = normalize_base_url(payload.mcip_base_url)
+            if new_url != await current_base_url():
+                changed.append("mcip_base_url")
+            await asyncio.to_thread(store.set_setting, SETTING_BASE_URL, new_url, updated_by=by)
+        current_key = await asyncio.to_thread(store.get_client_key)
+        if payload.client_key is not None:
+            new_key = payload.client_key.strip()
+            if not new_key.startswith("ss_cli_"):
+                raise api_error(
+                    400,
+                    "DEMO_CLIENT_KEY_FORMAT",
+                    "That does not look like an MCip client key (ss_cli_...).",
+                )
+            if new_key != current_key:
+                await asyncio.to_thread(store.set_client_key, new_key, updated_by=by)
+                changed.append("client_key")
+        elif payload.clear_client_key and current_key is not None:
+            await asyncio.to_thread(store.set_client_key, None, updated_by=by)
+            changed.append("client_key")
+        disconnected = 0
+        if changed:
+            disconnected = await asyncio.to_thread(store.delete_all_connections)
+            logger.warning(
+                "admin %s changed %s; disconnected %d user(s)", by, ",".join(changed), disconnected
+            )
+        return {
+            "settings": await settings_view(),
+            "changed": changed,
+            "disconnected": disconnected,
+        }
+
+    @app.post("/api/admin/settings/test", dependencies=[Depends(require_csrf)])
+    async def test_admin_settings(admin_id: int = Depends(require_admin)) -> dict[str, Any]:
+        """Is MCip reachable? And, if this admin is connected, do their key and
+        the client key pass ``GET /me`` together?"""
+        base_url = await current_base_url()
+        if not base_url:
+            raise api_error(503, "DEMO_NOT_CONFIGURED", "Set the MCip address first, then test it.")
+        result: dict[str, Any] = {"mcip_base_url": base_url}
+        try:
+            async with httpx.AsyncClient(transport=mcip_transport, timeout=10.0) as http:
+                response = await http.get(base_url + OPENAPI_PATH)
+            info = response.json().get("info", {}) if response.is_success else {}
+            result["reachable"] = response.is_success
+            result["api_version"] = info.get("version")
+            if not response.is_success:
+                result["detail"] = f"HTTP {response.status_code} from {OPENAPI_PATH}"
+        except (httpx.HTTPError, ValueError) as exc:
+            result["reachable"] = False
+            result["detail"] = redact(f"{type(exc).__name__}: {exc}")[:200]
+        key = await asyncio.to_thread(store.get_api_key, admin_id)
+        if not result["reachable"]:
+            result["client_check"] = "skipped"
+        elif not key:
+            result["client_check"] = "skipped"
+            result["client_detail"] = (
+                "Connect your own MCip key to also check the client key with GET /me."
+            )
+        else:
+            async with await mcip_client(key) as mcip:
+                try:
+                    me = await mcip.me()
+                    result["client_check"] = "ok"
+                    result["api_client"] = (me.get("api_client") or {}).get("name")
+                except ExtApiError as exc:
+                    error = translate_ext_error(exc)
+                    result["client_check"] = "failed"
+                    result["client_error"] = error.error_code
+                    result["client_detail"] = error.message
+        return result
 
     # -- conversations (Guide §4.3, §4.4) -----------------------------------
 

@@ -55,6 +55,10 @@ UI_STATE: dict[str, str] = {
     "API_CLIENT_DISABLED": "fatal",
     "API_CLIENT_NOT_ALLOWED": "fatal",
     "API_CLIENT_IP_DENIED": "fatal",
+    # The API client key (X-MCip-Client-Key) is set by the demo admin: no user
+    # action fixes it, so these are fatal, not "reconnect".
+    "CLIENT_KEY_MISSING": "fatal",
+    "CLIENT_KEY_INVALID": "fatal",
     "API_ACCESS_DISABLED": "workspace",
     "WORKSPACE_FORBIDDEN": "workspace",
     "FORBIDDEN": "fatal",
@@ -86,6 +90,10 @@ UI_STATE: dict[str, str] = {
     "DEMO_CSRF": "auth",
     "DEMO_KEY_FORMAT": "reconnect",
     "DEMO_NO_WORKSPACE": "workspace",
+    "DEMO_NOT_CONFIGURED": "fatal",
+    "DEMO_FORBIDDEN": "fatal",
+    "DEMO_BAD_URL": "fatal",
+    "DEMO_CLIENT_KEY_FORMAT": "fatal",
 }
 
 ADVICE: dict[str, str] = {
@@ -97,6 +105,10 @@ ADVICE: dict[str, str] = {
     "API_CLIENT_DISABLED": "The API client is disabled. Contact the MCip admin.",
     "API_CLIENT_NOT_ALLOWED": "You left the client's organization. Contact the MCip admin.",
     "API_CLIENT_IP_DENIED": "This server's IP is not on the client's allowlist.",
+    "CLIENT_KEY_MISSING": "The demo admin must set the API client key in Settings.",
+    "CLIENT_KEY_INVALID": (
+        "The API client key in Settings is wrong, revoked or expired. Ask the demo admin."
+    ),
     # Reserved: current MCip servers never emit this; older releases sent it
     # when a workspace's API-access toggle (since removed) was off.
     "API_ACCESS_DISABLED": (
@@ -131,6 +143,10 @@ ADVICE: dict[str, str] = {
     "DEMO_CSRF": "Reload the page and try again.",
     "DEMO_KEY_FORMAT": "An MCip chat key starts with 'ss_pat_'.",
     "DEMO_NO_WORKSPACE": "Choose a workspace before sending a message.",
+    "DEMO_NOT_CONFIGURED": "A demo admin must set the MCip address in Settings.",
+    "DEMO_FORBIDDEN": "Only a demo admin can change this.",
+    "DEMO_BAD_URL": "Enter the MCip address, e.g. https://mcip.example.com",
+    "DEMO_CLIENT_KEY_FORMAT": "An MCip client key starts with 'ss_cli_'.",
 }
 
 
