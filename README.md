@@ -43,8 +43,8 @@ What it demonstrates, end to end:
 
 ## Quick start
 
-You need an MCip deployment with an **API client** registered for this demo and a
-workspace with **"API key access"** turned on — see
+You need an MCip deployment with an **API client** registered for this demo, bound
+to the organisation whose workspaces the demo users chat in — see
 [`docs/integration-guide.md` §2](docs/integration-guide.md#2-onboarding). Each demo
 user then creates their own *External system* chat key in MCip and pastes it into the
 "Connect MCip" screen.

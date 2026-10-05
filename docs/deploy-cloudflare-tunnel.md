@@ -22,8 +22,26 @@ you add**, so treat the hostname as sensitive:
 
 ## 1. Prepare the demo
 
+### On MCip (once)
+
+- **API client:** an organization owner creates it at **Organization settings →
+  API clients** (or a system admin at **Admin → API clients**, choosing the
+  organization). Every client belongs to one organization, and its keys can only
+  reach that organization's workspaces.
+- **What the demo can reach is decided by membership.** API clients have no
+  workspace allowlist, so a key reaches every workspace of the client's
+  organization where its user has the chat permission. For a public demo, use a
+  dedicated organization or workspace (for example `Chat Demo`) with sample
+  documents only, and make the demo users members of that workspace only.
+- **Demo users** each create their own key at **User Settings → API Keys →
+  Create API key**, with **Use for: External system: <your client>**.
+- To cut a user off, revoke their key from the client's **Keys** panel; to stop
+  the whole demo, disable the client.
+
+### On the host
+
 ```bash
-cd ext-chat-demo
+cd mcip-chat-demo
 cp .env.example .env
 # edit .env:
 #   MCIP_BASE_URL=https://<your-mcip-host>
