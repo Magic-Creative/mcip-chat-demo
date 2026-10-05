@@ -311,10 +311,28 @@ async def test_static_javascript_is_served_as_javascript(session: DemoSession) -
         assert response.headers["content-type"].startswith("text/javascript"), path
 
 
-async def test_static_files_must_be_revalidated(session: DemoSession) -> None:
-    """After a deploy the browser must not keep an old app.js (Cloudflare 4 h TTL)."""
-    response = await session.client.get("/static/app.js")
-    assert response.headers["cache-control"] == "no-cache"
-    assert response.headers.get("etag")
+async def test_assets_are_served_under_a_per_build_path(session: DemoSession, demo_app) -> None:
+    """A deploy changes every asset URL, so no cache (browser or Cloudflare,
+    which overrides Cache-Control) can serve an old app.js with new HTML."""
     page = await session.client.get("/")
     assert page.headers["cache-control"] == "no-store"
+    build = demo_app.state.build_id
+    assert f'src="/s/{build}/app.js"' in page.text
+    assert f'href="/s/{build}/styles.css"' in page.text
+    assert '"/static/' not in page.text
+    asset = await session.client.get(f"/s/{build}/app.js")
+    assert asset.status_code == 200
+    assert asset.headers["content-type"].startswith("text/javascript")
+    assert "immutable" in asset.headers["cache-control"]
+    # relative module imports resolve under the same versioned prefix
+    assert (await session.client.get(f"/s/{build}/vendor/purify.es.mjs")).status_code == 200
+    assert (await session.client.get("/s/000000000000/app.js")).status_code == 404
+
+
+def test_build_id_changes_with_the_files(tmp_path) -> None:
+    from app.main import static_build_id
+
+    (tmp_path / "app.js").write_text("one", encoding="utf-8")
+    first = static_build_id(tmp_path)
+    (tmp_path / "app.js").write_text("two", encoding="utf-8")
+    assert static_build_id(tmp_path) != first
