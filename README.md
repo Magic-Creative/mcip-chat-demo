@@ -138,21 +138,22 @@ python -m app.admin_cli remove-user alice        # also drops their key + chats
 
 ### Demo accounts (the test deployment)
 
-The demo's test deployment has `DEMO_ALLOW_REGISTER` off and ships five throwaway
-accounts for testers, created with `demo-admin add-user` (common users, no admin
-rights):
+The demo's test deployment has `DEMO_ALLOW_REGISTER` off; its accounts come from
+`demo-admin add-user` (and `reset-password`). One demo admin and five common users
+for testers:
 
-| Username | Password |
-|---|---|
-| `tester1` | `HEK94Ezq49cC7but` |
-| `tester2` | `AKy5gicu7kAhC9yW` |
-| `tester3` | `gFzRxu5yMnnrwsyq` |
-| `tester4` | `bnVbvnPc2koVgVSy` |
-| `tester5` | `RWnsux4GH7uk8CxX` |
+| Username | Password | Role |
+|---|---|---|
+| `admin` | `Admin@2026!` | demo admin — Settings: the MCip address and the client key |
+| `tester1` | `Tester@2026!` | common user |
+| `tester2` | `Tester@2026!` | common user |
+| `tester3` | `Tester@2026!` | common user |
+| `tester4` | `Tester@2026!` | common user |
+| `tester5` | `Tester@2026!` | common user |
 
-The CLI prints each password once on creation; the database stores only its argon2
-hash. Rotate one with `python -m app.admin_cli reset-password tester1`, delete one with
-`remove-user`. If this repository ever becomes public, rotate these first.
+The database stores only argon2 hashes, never the passwords themselves. Rotate one with
+`python -m app.admin_cli reset-password tester1`, delete one with `remove-user`. If this
+repository ever becomes public, rotate these first.
 
 ## The 10-minute acceptance path
 
