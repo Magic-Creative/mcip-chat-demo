@@ -225,22 +225,102 @@ async def test_set_and_clear_together_is_refused(admin: DemoSession) -> None:
 # -- test connection -------------------------------------------------------
 
 
-async def test_connection_test_reports_reachability_and_client(admin: DemoSession, fake) -> None:
-    result = (await admin.post("/api/admin/settings/test")).json()
-    assert result["reachable"] is True
-    assert result["api_version"] == "1.0.0"
-    assert result["client_check"] == "skipped"  # admin not connected yet
+async def _test(admin: DemoSession) -> dict:
+    response = await admin.post("/api/admin/settings/test")
+    assert response.status_code == 200
+    body = response.json()
+    assert CLIENT_KEY not in response.text and OTHER_CLIENT_KEY not in response.text
+    return body
 
+
+async def test_test_checks_the_address(admin: DemoSession) -> None:
+    result = await _test(admin)
+    assert result["address"] == {"status": "ok", "api_version": "1.0.0"}
+    assert result["client_key"]["status"] == "not_set"
+    assert result["user_key"]["status"] == "skipped"
+    assert result["ok"] is True
+
+
+async def test_test_reports_an_address_that_is_not_mcip(app_with, store: Store) -> None:
+    app = app_with()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://demo.test"
+    ) as client:
+        s = DemoSession(client)
+        store.create_user("root", "password123", is_admin=True)
+        await s.login("root")
+        await s.put("/api/admin/settings", {"mcip_base_url": "http://localhost:9/wrong"})
+        result = (await s.post("/api/admin/settings/test")).json()
+        assert result["address"]["status"] == "failed"
+        assert result["client_key"]["status"] == "skipped"
+        assert result["ok"] is False
+
+
+async def test_valid_client_key_is_confirmed_on_its_own(admin: DemoSession, fake) -> None:
+    fake.valid_client_key = CLIENT_KEY
     await admin.put("/api/admin/settings", {"client_key": CLIENT_KEY})
-    fake.required_client_key = CLIENT_KEY
-    await admin.connect()
-    result = (await admin.post("/api/admin/settings/test")).json()
-    assert result["client_check"] == "ok"
+    result = await _test(admin)
+    assert result["client_key"]["status"] == "ok"
+    assert result["client_key"]["api_client"] == {"id": 7, "name": "Acme Assist (demo)"}
+    assert result["client_key"]["organization"] == "KAI"
+    assert result["user_key"]["status"] == "skipped"  # admin not connected: no user key needed
+    assert result["ok"] is True
 
-    fake.required_client_key = OTHER_CLIENT_KEY
-    result = (await admin.post("/api/admin/settings/test")).json()
-    assert result["client_check"] == "failed"
-    assert result["client_error"] == "CLIENT_KEY_INVALID"
+
+async def test_invalid_client_key_fails_without_a_user_key(admin: DemoSession, fake) -> None:
+    fake.valid_client_key = CLIENT_KEY
+    await admin.put("/api/admin/settings", {"client_key": OTHER_CLIENT_KEY})
+    result = await _test(admin)
+    assert result["client_key"]["status"] == "failed"
+    assert result["client_key"]["error"] == "CLIENT_KEY_INVALID"
+    assert (
+        "demo admin" in result["client_key"]["detail"]
+        or "Settings" in result["client_key"]["detail"]
+    )
+    assert result["ok"] is False
+
+
+async def test_rotated_client_key_in_grace_is_flagged(admin: DemoSession, fake) -> None:
+    fake.valid_client_key = CLIENT_KEY
+    fake.client_key_in_grace = True
+    await admin.put("/api/admin/settings", {"client_key": CLIENT_KEY})
+    result = await _test(admin)
+    assert result["client_key"]["status"] == "ok"
+    assert "stops working" in result["client_key"]["detail"]
+
+
+async def test_old_mcip_reports_client_keys_unsupported(admin: DemoSession, fake) -> None:
+    # fake.valid_client_key is None: GET /ext/client returns 404 (MCip before #1207)
+    await admin.put("/api/admin/settings", {"client_key": CLIENT_KEY})
+    result = await _test(admin)
+    assert result["client_key"]["status"] == "unsupported"
+    assert "can't be validated" in result["client_key"]["detail"]
+    assert result["ok"] is False  # never report an unverified key as fine
+
+
+async def test_user_key_is_checked_with_the_client_key(admin: DemoSession, fake) -> None:
+    fake.valid_client_key = CLIENT_KEY
+    fake.required_client_key = CLIENT_KEY
+    await admin.put("/api/admin/settings", {"client_key": CLIENT_KEY})
+    await admin.connect()
+    result = await _test(admin)
+    assert result["user_key"] == {"status": "ok", "api_client": "Acme Assist (demo)"}
+
+    fake.me_error = (401, {"errorCode": "API_KEY_INVALID", "message": "unknown key"})
+    result = await _test(admin)
+    assert result["user_key"]["status"] == "failed"
+    assert result["user_key"]["error"] == "API_KEY_INVALID"
+
+
+async def test_user_key_for_another_client_is_a_mismatch(admin: DemoSession, fake) -> None:
+    fake.valid_client_key = CLIENT_KEY
+    await admin.put("/api/admin/settings", {"client_key": CLIENT_KEY})
+    await admin.connect()
+    fake.client_payload = {**fake.client_payload, "id": 99, "name": "Other system"}
+    result = await _test(admin)
+    assert result["user_key"]["status"] == "failed"
+    assert result["user_key"]["error"] == "KEY_CLIENT_MISMATCH"
+    assert result["ok"] is False
 
 
 # -- first run (no base URL anywhere) ------------------------------------------

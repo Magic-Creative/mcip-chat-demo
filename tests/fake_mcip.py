@@ -63,6 +63,16 @@ class FakeMcip:
         self.client_keys_seen: list[str | None] = []  # X-MCip-Client-Key on /me
         #: When set, /me requires this X-MCip-Client-Key (MCip #1207 behaviour).
         self.required_client_key: str | None = None
+        #: The key GET /ext/client accepts (MCip #1207); None = route absent (old MCip).
+        self.valid_client_key: str | None = None
+        self.client_key_in_grace = False
+        self.client_payload: dict[str, Any] = {
+            "id": 7,
+            "name": "Acme Assist (demo)",
+            "organization": {"id": 4, "name": "KAI"},
+            "enabled": True,
+            "require_client_key": True,
+        }
         self.completed: dict[str, dict[str, Any]] = {}  # idempotency key → turn body
         self.executed_turns = 0  # scripted turns run (replays don't count)
         self.transcripts: dict[int, list[dict[str, Any]]] = {}
@@ -109,6 +119,8 @@ class FakeMcip:
         self.me_payload = DEFAULT_ME
         self.client_keys_seen.clear()
         self.required_client_key = None
+        self.valid_client_key = None
+        self.client_key_in_grace = False
 
     # -- the ASGI app --------------------------------------------------------
 
@@ -117,7 +129,30 @@ class FakeMcip:
 
         @app.get(f"{API_PREFIX}/openapi.json")
         async def openapi() -> Response:
-            return JSONResponse({"openapi": "3.1.0", "info": {"version": "1.0.0"}})
+            return JSONResponse(
+                {
+                    "openapi": "3.1.0",
+                    "info": {"title": "MCip External Chat API", "version": "1.0.0"},
+                }
+            )
+
+        @app.get(f"{API_PREFIX}/client")
+        async def client_check(request: Request) -> Response:
+            if self.valid_client_key is None:  # an MCip release before #1207
+                return JSONResponse({"detail": "Not Found"}, status_code=404)
+            key = request.headers.get("x-mcip-client-key")
+            if not key:
+                return JSONResponse(error_body("CLIENT_KEY_MISSING"), status_code=401)
+            if key != self.valid_client_key:
+                return JSONResponse(error_body("CLIENT_KEY_INVALID"), status_code=401)
+            body = {
+                "api_client": self.client_payload,
+                "key": {
+                    "prefix": key[:16],
+                    "expires_at": "2026-10-07T00:00:00Z" if self.client_key_in_grace else None,
+                },
+            }
+            return JSONResponse(body)
 
         @app.get(f"{API_PREFIX}/me")
         async def me(request: Request) -> Response:

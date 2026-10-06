@@ -352,20 +352,27 @@ async function testSettings() {
   status.textContent = 'Testing…';
   try {
     const result = await api('/api/admin/settings/test', { method: 'POST', csrf: true });
-    const parts = [];
-    parts.push(
-      result.reachable
-        ? `MCip reachable${result.api_version ? ` (API ${result.api_version})` : ''}.`
-        : `MCip not reachable: ${result.detail || 'no answer'}.`,
-    );
-    if (result.client_check === 'ok') {
-      parts.push(`Your key and the client key work (client: ${result.api_client || '?'}).`);
-    } else if (result.client_check === 'failed') {
-      parts.push(`Key check failed: ${result.client_error} — ${result.client_detail}`);
-    } else if (result.client_detail) {
-      parts.push(result.client_detail);
-    }
-    status.textContent = parts.join(' ');
+    const mark = (check) =>
+      ({ ok: '✓', failed: '✗', unsupported: '!', not_set: '–', skipped: '–' })[check.status] || '?';
+    const line = (label, check, okText) =>
+      `${mark(check)} ${label}: ${check.status === 'ok' ? okText : ''}${
+        check.error ? `${check.error} — ` : ''
+      }${check.detail || (check.status === 'ok' ? '' : check.status)}`.trim();
+    const a = result.address;
+    const c = result.client_key;
+    const u = result.user_key;
+    const parts = [
+      line('MCip address', a, `reachable${a.api_version ? ` (API ${a.api_version})` : ''}. `),
+      line(
+        'API client key',
+        c,
+        `valid for “${c.api_client ? c.api_client.name : '?'}”${
+          c.organization ? ` (${c.organization})` : ''
+        }. `,
+      ),
+      line('Your user key', u, `works with the client key (client: ${u.api_client || '?'}). `),
+    ];
+    parts.push(result.ok ? 'All checks passed.' : 'Some checks did not pass.');    status.textContent = parts.join('\n');
   } catch (error) {
     status.textContent = '';
     if (error instanceof ApiError && error.ui === 'auth') return sessionExpired(error.fullText);
