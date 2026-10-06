@@ -138,9 +138,9 @@ python -m app.admin_cli remove-user alice        # also drops their key + chats
 
 ### Demo accounts (the test deployment)
 
-The demo's test deployment has `DEMO_ALLOW_REGISTER` off; its accounts come from
-`demo-admin add-user` (and `reset-password`). One demo admin and five common users
-for testers:
+The demo's test deployment runs at <https://chatbot-mcip.igsl-group.uk>. It has
+`DEMO_ALLOW_REGISTER` off; its accounts come from `demo-admin add-user` (and
+`reset-password`). One demo admin and five common users for testers:
 
 | Username | Password | Role |
 |---|---|---|
