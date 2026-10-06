@@ -48,8 +48,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import Settings, load_settings
-from app.errors import DemoError
-from app.mcip import ExtApiError, McipClient
+from app.errors import DemoError, advice
+from app.mcip import CLIENT_KEY_HEADER, ExtApiError, McipClient
 from app.relay import relay_turn, translate_ext_error
 from app.store import (
     SETTING_BASE_URL,
@@ -88,6 +88,8 @@ COOKIE_MAX_AGE = 14 * 24 * 3600
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 #: Where the admin "Test connection" looks for MCip (public, no auth).
 OPENAPI_PATH = "/api/v1/ext/openapi.json"
+#: Client-key-only check (MCip #1207): 200 with the client, or 401/403.
+CLIENT_CHECK_PATH = "/api/v1/ext/client"
 
 CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
@@ -710,43 +712,140 @@ def create_app(
 
     @app.post("/api/admin/settings/test", dependencies=[Depends(require_csrf)])
     async def test_admin_settings(admin_id: int = Depends(require_admin)) -> dict[str, Any]:
-        """Is MCip reachable? And, if this admin is connected, do their key and
-        the client key pass ``GET /me`` together?"""
+        """Check the saved settings, each part on its own.
+
+        * ``address``: the MCip address answers with the External Chat API's
+          OpenAPI document.
+        * ``client_key``: the stored API client key, checked alone with
+          ``GET /ext/client`` (MCip #1207). Older MCip releases don't have that
+          route (404): they don't check client keys at all, so the key can't be
+          validated and is ignored.
+        * ``user_key``: this admin's own connected key plus the client key, with
+          ``GET /ext/me``; it must belong to the same API client.
+        """
         base_url = await current_base_url()
         if not base_url:
             raise api_error(503, "DEMO_NOT_CONFIGURED", "Set the MCip address first, then test it.")
+        client_key = await asyncio.to_thread(store.get_client_key)
         result: dict[str, Any] = {"mcip_base_url": base_url}
+
+        # 1. address
+        address: dict[str, Any] = {"status": "failed"}
         try:
             async with httpx.AsyncClient(transport=mcip_transport, timeout=10.0) as http:
                 response = await http.get(base_url + OPENAPI_PATH)
             info = response.json().get("info", {}) if response.is_success else {}
-            result["reachable"] = response.is_success
-            result["api_version"] = info.get("version")
             if not response.is_success:
-                result["detail"] = f"HTTP {response.status_code} from {OPENAPI_PATH}"
+                address["detail"] = f"HTTP {response.status_code} from {OPENAPI_PATH}."
+            elif "External Chat API" not in str(info.get("title", "")):
+                address["detail"] = "That address answers, but not with the MCip External Chat API."
+            else:
+                address = {"status": "ok", "api_version": info.get("version")}
         except (httpx.HTTPError, ValueError) as exc:
-            result["reachable"] = False
-            result["detail"] = redact(f"{type(exc).__name__}: {exc}")[:200]
-        key = await asyncio.to_thread(store.get_api_key, admin_id)
-        if not result["reachable"]:
-            result["client_check"] = "skipped"
-        elif not key:
-            result["client_check"] = "skipped"
-            result["client_detail"] = (
-                "Connect your own MCip key to also check the client key with GET /me."
-            )
+            address["detail"] = redact(f"Not reachable: {type(exc).__name__}: {exc}")[:200]
+        result["address"] = address
+
+        # 2. client key, on its own
+        client_check: dict[str, Any]
+        if address["status"] != "ok":
+            client_check = {"status": "skipped", "detail": "Fix the MCip address first."}
+        elif not client_key:
+            client_check = {
+                "status": "not_set",
+                "detail": "No client key stored. Only needed if the MCip API client requires one.",
+            }
         else:
-            async with await mcip_client(key) as mcip:
+            client_check = await check_client_key(base_url, client_key)
+        result["client_key"] = client_check
+
+        # 3. this admin's own key, together with the client key
+        user_check: dict[str, Any]
+        user_key = await asyncio.to_thread(store.get_api_key, admin_id)
+        if address["status"] != "ok":
+            user_check = {"status": "skipped", "detail": "Fix the MCip address first."}
+        elif not user_key:
+            user_check = {
+                "status": "skipped",
+                "detail": "Connect your own MCip key to also check a user key with the client key.",
+            }
+        else:
+            async with await mcip_client(user_key) as mcip:
                 try:
                     me = await mcip.me()
-                    result["client_check"] = "ok"
-                    result["api_client"] = (me.get("api_client") or {}).get("name")
+                    client = me.get("api_client") or {}
+                    user_check = {"status": "ok", "api_client": client.get("name")}
+                    expected = (client_check.get("api_client") or {}).get("id")
+                    if expected is not None and client.get("id") != expected:
+                        user_check = {
+                            "status": "failed",
+                            "error": "KEY_CLIENT_MISMATCH",
+                            "detail": (
+                                f"Your key is for '{client.get('name')}', but the client key "
+                                f"is for '{client_check['api_client'].get('name')}'."
+                            ),
+                        }
                 except ExtApiError as exc:
                     error = translate_ext_error(exc)
-                    result["client_check"] = "failed"
-                    result["client_error"] = error.error_code
-                    result["client_detail"] = error.message
+                    user_check = {
+                        "status": "failed",
+                        "error": error.error_code,
+                        "detail": f"{error.message} {advice(error.error_code)}".strip(),
+                    }
+        result["user_key"] = user_check
+        result["ok"] = (
+            address["status"] == "ok"
+            and client_check["status"]
+            in {
+                "ok",
+                "not_set",
+            }
+            and user_check["status"] != "failed"
+        )
         return result
+
+    async def check_client_key(base_url: str, client_key: str) -> dict[str, Any]:
+        """``GET /ext/client`` with only the client key (MCip #1207)."""
+        try:
+            async with httpx.AsyncClient(transport=mcip_transport, timeout=10.0) as http:
+                response = await http.get(
+                    base_url + CLIENT_CHECK_PATH, headers={CLIENT_KEY_HEADER: client_key}
+                )
+        except httpx.HTTPError as exc:
+            return {"status": "failed", "error": "NETWORK_ERROR", "detail": redact(str(exc))[:200]}
+        try:
+            body = response.json()
+        except ValueError:
+            body = {}
+        if response.status_code == 404 and not body.get("errorCode"):
+            return {
+                "status": "unsupported",
+                "detail": (
+                    "This MCip release doesn't check API client keys yet, so the key can't be "
+                    "validated (MCip ignores it until client keys ship)."
+                ),
+            }
+        if response.is_success:
+            client = body.get("api_client") or {}
+            org = client.get("organization") or {}
+            key = body.get("key") or {}
+            check: dict[str, Any] = {
+                "status": "ok",
+                "api_client": {"id": client.get("id"), "name": client.get("name")},
+                "organization": org.get("name"),
+                "require_client_key": client.get("require_client_key"),
+            }
+            if key.get("expires_at"):
+                check["detail"] = (
+                    f"This key was rotated and stops working at {key['expires_at']}. "
+                    "Save the new key."
+                )
+            return check
+        code = str(body.get("errorCode") or f"HTTP_{response.status_code}")
+        return {
+            "status": "failed",
+            "error": code,
+            "detail": f"{body.get('message') or ''} {advice(code)}".strip(),
+        }
 
     # -- conversations (Guide §4.3, §4.4) -----------------------------------
 
