@@ -130,9 +130,29 @@ python -m app.admin_cli reset-password alice
 python -m app.admin_cli remove-user alice        # also drops their key + chats
 ```
 
+### Demo accounts (the test deployment)
+
+The demo's test deployment has `DEMO_ALLOW_REGISTER` off; its accounts come from
+`demo-admin add-user` (and `reset-password`). One demo admin and five common users
+for testers:
+
+| Username | Password | Role |
+|---|---|---|
+| `admin` | `Admin@2026!` | demo admin — Settings: the MCip address and the client key |
+| `tester1` | `Tester@2026!` | common user |
+| `tester2` | `Tester@2026!` | common user |
+| `tester3` | `Tester@2026!` | common user |
+| `tester4` | `Tester@2026!` | common user |
+| `tester5` | `Tester@2026!` | common user |
+
+The database stores only argon2 hashes, never the passwords themselves. Rotate one with
+`python -m app.admin_cli reset-password tester1`, delete one with `remove-user`. If this
+repository ever becomes public, rotate these first.
+
 ## The 10-minute acceptance path
 
-1. **Sign in** as a user you created. With `DEMO_ALLOW_REGISTER=true` you can register
+1. **Sign in** as a user you created — on the test deployment, one of the
+   `tester1`–`tester5` accounts above. With `DEMO_ALLOW_REGISTER=true` you can register
    in the UI instead.
 2. **Connect MCip**: paste the user's `ss_pat_…` chat key. The demo answers with who
    you are connected as, the key's expiry and the workspaces it may use — and never
