@@ -119,6 +119,26 @@ async def test_connect_stores_the_key_and_never_returns_it(session: DemoSession,
     assert fake.me_requests[-1] == f"Bearer {TEST_KEY}"
 
 
+async def test_session_reports_the_base_url_and_key_prefixes(session: DemoSession, store):
+    store.create_user("alice", "password123")
+    anonymous = await session.boot()
+    assert "mcip_base_url" not in anonymous  # configuration is for signed-in users
+    assert "client_key_prefix" not in anonymous
+
+    await session.login("alice")
+    boot = await session.boot()
+    assert boot["mcip_base_url"] == "http://mcip.test"
+    assert boot["client_key_prefix"] is None  # no client key stored yet
+
+    client_key = "ss_cli_demo0000000000000000"  # pragma: allowlist secret
+    store.set_client_key(client_key, updated_by="admin")
+    await session.connect()
+    boot = await session.boot()
+    assert boot["client_key_prefix"] == "ss_cli_demo00000"
+    assert boot["connection"]["key_prefix"] == "ss_pat_demo000000"
+    assert client_key not in json.dumps(boot)
+
+
 async def test_connect_surfaces_mcip_refusals(session: DemoSession, store, fake):
     store.create_user("alice", "password123")
     await session.login("alice")
@@ -530,11 +550,20 @@ async def test_theme_toggle_and_views_exist_in_the_page(session: DemoSession):
         "view-connect",
         "view-workspace",
         "view-chat",
+        "view-info",
+        "info-button",
         "composer-input",
         "status-line",
         "theme-toggle",
     ):
         assert f'id="{element_id}"' in html
+
+
+async def test_the_developer_guide_is_linked_for_signed_out_and_in_users(session: DemoSession):
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    # the sign-in card (signed out), the connect card, the chat sidebar and
+    # the developer info view (signed in)
+    assert html.count("wiki/Developer-Guide") >= 4
 
 
 async def test_the_key_never_reaches_the_logs(ready: DemoSession, fake, caplog):

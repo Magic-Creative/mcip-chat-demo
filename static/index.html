@@ -81,6 +81,11 @@
             Create an account
           </button>
         </p>
+        <p class="muted small">
+          Building your own chatbot on MCip? Start with the
+          <a href="https://github.com/Magic-Creative/mcip-chat-demo/wiki/Developer-Guide"
+             target="_blank" rel="noopener">Developer Guide</a>.
+        </p>
       </div>
     </section>
 
@@ -137,6 +142,30 @@
       </div>
     </section>
 
+    <!-- Developer info -->
+    <section id="view-info" class="view centered" hidden>
+      <div class="card wide">
+        <h2>Developer info</h2>
+        <p class="muted">
+          The configuration this demo uses to call
+          <strong id="info-host">MCip</strong>, for reference while you build
+          your own client. Keys never reach the browser: only the same
+          16-character prefixes MCip shows are listed here.
+        </p>
+        <dl id="info-list" class="info-list"></dl>
+        <p class="muted small">
+          Your key travels to MCip as <code>Authorization: Bearer</code>; the
+          system key as <code>X-MCip-Client-Key</code>. Both are stored
+          encrypted on this server. Full walkthrough:
+          <a href="https://github.com/Magic-Creative/mcip-chat-demo/wiki/Developer-Guide"
+             target="_blank" rel="noopener">Developer Guide</a>.
+        </p>
+        <div class="row">
+          <button id="info-close" class="button ghost" type="button">Back</button>
+        </div>
+      </div>
+    </section>
+
     <!-- Connect MCip -->
     <section id="view-connect" class="view centered" hidden>
       <div class="card">
@@ -159,6 +188,10 @@
         </form>
         <p class="muted small">
           Revoke the key any time in MCip; the demo stops working immediately.
+          Building your own client? The
+          <a href="https://github.com/Magic-Creative/mcip-chat-demo/wiki/Developer-Guide"
+             target="_blank" rel="noopener">Developer Guide</a> walks through
+          the same flow.
         </p>
       </div>
     </section>
@@ -205,6 +238,11 @@
         <div class="sidebar-foot">
           <p id="connection-summary" class="muted small"></p>
           <button id="disconnect" class="button ghost block" type="button">Disconnect MCip key</button>
+          <button id="info-button" class="button ghost block" type="button">Developer info</button>
+          <p id="sidebar-guide" class="muted small">
+            <a href="https://github.com/Magic-Creative/mcip-chat-demo/wiki/Developer-Guide"
+               target="_blank" rel="noopener">Developer Guide</a>
+          </p>
         </div>
       </aside>
       <div id="scrim" class="scrim" hidden></div>
