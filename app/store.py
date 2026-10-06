@@ -48,7 +48,10 @@ CREATE TABLE IF NOT EXISTS mcip_connections (
     workspaces_json TEXT NOT NULL DEFAULT '[]',
     workspace_id    INTEGER,
     workspace_name  TEXT,
-    connected_at    TEXT NOT NULL
+    connected_at    TEXT NOT NULL,
+    -- When workspaces_json was last fetched from GET /ext/me (connect or
+    -- refresh); the UI re-refreshes once per boot when this is old.
+    workspaces_updated_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS conversations (
@@ -57,7 +60,13 @@ CREATE TABLE IF NOT EXISTS conversations (
     mcip_conversation_id INTEGER,
     title            TEXT NOT NULL,
     created_at       TEXT NOT NULL,
-    updated_at       TEXT NOT NULL
+    updated_at       TEXT NOT NULL,
+    -- The workspace active when the conversation was started: MCip
+    -- conversations belong to one workspace, so the sidebar, transcript,
+    -- delete and chat routes are all scoped by it (issue #7). NULL only on
+    -- rows created before the column existed; they are adopted by the
+    -- user's current workspace on first read (adopt_orphan_conversations).
+    workspace_id     INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS ix_conversations_user ON conversations(user_id, updated_at DESC);
@@ -159,12 +168,25 @@ class Store:
         with self._init_lock, self._connect() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(SCHEMA)
-            # Databases created before the admin role: add the column in place.
-            columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)")}
-            if "is_admin" not in columns:
+            # Database from an older release: add the newer columns in place.
+            # (CREATE TABLE IF NOT EXISTS above leaves old tables untouched.)
+            user_columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)")}
+            if "is_admin" not in user_columns:
                 connection.execute(
                     "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"
                 )
+            connection_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(mcip_connections)")
+            }
+            if "workspaces_updated_at" not in connection_columns:
+                connection.execute(
+                    "ALTER TABLE mcip_connections ADD COLUMN workspaces_updated_at TEXT"
+                )
+            conversation_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(conversations)")
+            }
+            if "workspace_id" not in conversation_columns:
+                connection.execute("ALTER TABLE conversations ADD COLUMN workspace_id INTEGER")
 
     # -- users ---------------------------------------------------------------
 
@@ -246,8 +268,8 @@ class Store:
                 INSERT INTO mcip_connections (
                     user_id, key_ciphertext, key_prefix, mcip_user_id, display_name,
                     email, api_client_name, expires_at, workspaces_json,
-                    workspace_id, workspace_name, connected_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+                    workspace_id, workspace_name, connected_at, workspaces_updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     key_ciphertext = excluded.key_ciphertext,
                     key_prefix = excluded.key_prefix,
@@ -259,7 +281,8 @@ class Store:
                     workspaces_json = excluded.workspaces_json,
                     workspace_id = NULL,
                     workspace_name = NULL,
-                    connected_at = excluded.connected_at
+                    connected_at = excluded.connected_at,
+                    workspaces_updated_at = excluded.workspaces_updated_at
                 """,
                 (
                     user_id,
@@ -271,6 +294,7 @@ class Store:
                     api_client_name,
                     expires_at,
                     _json_dumps(workspaces),
+                    now_iso(),
                     now_iso(),
                 ),
             )
@@ -303,12 +327,51 @@ class Store:
             self.delete_connection(user_id)
             return None
 
-    def set_workspace(self, user_id: int, workspace_id: int, workspace_name: str) -> bool:
+    def set_workspace(
+        self, user_id: int, workspace_id: int | None, workspace_name: str | None
+    ) -> bool:
+        """Choose the active workspace; ``None`` clears it (its workspace was
+        removed in MCip, or the key changed)."""
         with self._connect() as connection:
             cursor = connection.execute(
                 "UPDATE mcip_connections SET workspace_id = ?, workspace_name = ? "
                 "WHERE user_id = ?",
                 (workspace_id, workspace_name, user_id),
+            )
+            return cursor.rowcount > 0
+
+    def refresh_connection_snapshot(
+        self,
+        user_id: int,
+        *,
+        display_name: str | None,
+        email: str | None,
+        api_client_name: str | None,
+        expires_at: str | None,
+        workspaces: list[dict[str, Any]],
+    ) -> bool:
+        """Re-read the ``GET /ext/me`` snapshot after a Refresh (issue #7).
+
+        Updates the names, the key expiry and the workspace list in place; the
+        key itself, its prefix and the chosen workspace stay untouched (the
+        caller decides whether the chosen workspace survived)."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE mcip_connections SET
+                    display_name = ?, email = ?, api_client_name = ?,
+                    expires_at = ?, workspaces_json = ?, workspaces_updated_at = ?
+                WHERE user_id = ?
+                """,
+                (
+                    display_name,
+                    email,
+                    api_client_name,
+                    expires_at,
+                    _json_dumps(workspaces),
+                    now_iso(),
+                    user_id,
+                ),
             )
             return cursor.rowcount > 0
 
@@ -377,16 +440,17 @@ class Store:
 
     # -- conversations -------------------------------------------------------
 
-    def create_conversation(self, user_id: int, title: str) -> int:
+    def create_conversation(self, user_id: int, title: str, *, workspace_id: int) -> int:
+        """A new conversation, recorded under the workspace the turn runs in."""
         stamp = now_iso()
         with self._connect() as connection:
             cursor = connection.execute(
                 """
                 INSERT INTO conversations
-                    (user_id, mcip_conversation_id, title, created_at, updated_at)
-                VALUES (?, NULL, ?, ?, ?)
+                    (user_id, mcip_conversation_id, title, created_at, updated_at, workspace_id)
+                VALUES (?, NULL, ?, ?, ?, ?)
                 """,
-                (user_id, title, stamp, stamp),
+                (user_id, title, stamp, stamp, workspace_id),
             )
             return int(cursor.lastrowid)
 
@@ -405,14 +469,39 @@ class Store:
                 (now_iso(), conversation_id, user_id),
             )
 
-    def list_conversations(self, user_id: int) -> list[dict[str, Any]]:
+    def list_conversations(
+        self, user_id: int, workspace_id: int | None
+    ) -> list[dict[str, Any]]:
+        """The conversations of one workspace, most recent first.
+
+        ``None`` (no workspace chosen) matches nothing: conversations of a
+        workspace the user is not currently in stay hidden, never mixed."""
+        if workspace_id is None:
+            return []
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT id, mcip_conversation_id, title, created_at, updated_at "
-                "FROM conversations WHERE user_id = ? ORDER BY updated_at DESC, id DESC",
-                (user_id,),
+                "FROM conversations WHERE user_id = ? AND workspace_id = ? "
+                "ORDER BY updated_at DESC, id DESC",
+                (user_id, workspace_id),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def adopt_orphan_conversations(self, user_id: int, workspace_id: int) -> int:
+        """Assign the user's pre-workspace rows (``workspace_id`` NULL) to
+        their current workspace (issue #7).
+
+        Legacy rows were created before the column existed, in whatever
+        workspace the user could use then — on first read they join the one
+        they are in now. A no-op once every row has a workspace; while the
+        user has no workspace chosen the rows stay NULL (hidden)."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE conversations SET workspace_id = ? "
+                "WHERE user_id = ? AND workspace_id IS NULL",
+                (workspace_id, user_id),
+            )
+            return cursor.rowcount
 
     def get_conversation(self, user_id: int, conversation_id: int) -> dict[str, Any] | None:
         with self._connect() as connection:
