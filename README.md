@@ -52,6 +52,37 @@ What it demonstrates, end to end:
   state-changing route, strict CSP (no inline code), demo-side rate limits, and a log
   filter that redacts `ss_pat_…` keys.
 
+## API reference (OpenAPI)
+
+Every MCip deployment that has the External Chat API publishes its spec online.
+Both URLs are public (no login, no key) and cover only the external `/api/v1/ext`
+routes, not MCip's internal API:
+
+| What | URL |
+|---|---|
+| Interactive spec (Swagger UI) | `https://<mcip-host>/api/v1/ext/docs` |
+| OpenAPI 3 document (JSON) | `https://<mcip-host>/api/v1/ext/openapi.json` |
+
+Live example (dev): <https://dev-mcintelligentplus.igsl-group.uk/api/v1/ext/docs>
+
+The spec documents these endpoints, all request/response and SSE event models, and the
+`{errorCode, message, request_id}` error body:
+
+| Endpoint | Purpose | Guide |
+|---|---|---|
+| `GET /api/v1/ext/client` | Test the connection with the API client key only (`X-MCip-Client-Key`) | §3 |
+| `GET /api/v1/ext/me` | Validate a user's key: user, API client, key expiry, usable workspaces | §4.1 |
+| `POST /api/v1/ext/chat` | One chat turn, SSE stream (default) or JSON (`stream: false`) | §4.2, §5 |
+| `GET /api/v1/ext/conversations/{conversation_id}/messages` | Paged transcript of a conversation | §4.3 |
+| `DELETE /api/v1/ext/conversations/{conversation_id}` | Delete a conversation in MCip | §4.4 |
+
+To try a call in Swagger UI, click **Authorize** and enter a user's chat-scoped key
+(`ss_pat_…`) under `ExtApiKey` and, if your API client requires one, its client key
+(`ss_cli_…`) under `ClientKey`. A full-access key gets `403 API_KEY_SCOPE`. Use
+`/api/v1/ext/docs`, not MCip's `/swagger`: `/swagger` is the internal API and not a
+contract for callers. The [integration guide](docs/integration-guide.md) covers the
+rules the spec can't express (retries and idempotency §8, key storage §11).
+
 ## Quick start
 
 You need an MCip deployment with an **API client** registered for this demo, bound
