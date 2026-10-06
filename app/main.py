@@ -349,6 +349,7 @@ def create_app(
             "expires_at": expires_at,
             "expires_days": expires_days,
             "workspaces": connection.get("workspaces") or [],
+            "workspaces_updated_at": connection.get("workspaces_updated_at"),
             "workspace": (
                 {"id": connection["workspace_id"], "name": connection["workspace_name"]}
                 if connection.get("workspace_id")
@@ -658,6 +659,59 @@ def create_app(
         connection = await asyncio.to_thread(store.get_connection, user_id)
         return {"connection": connection_view(connection)}
 
+    @app.post("/api/connection/refresh", dependencies=[Depends(require_csrf)])
+    async def refresh_connection(user_id: UserId) -> dict[str, Any]:
+        """Re-read ``GET /ext/me`` and update the stored snapshot (issue #7).
+
+        The key, its prefix and the chosen workspace stay; the names, the key
+        expiry and the workspace list are replaced with what MCip says now.
+        When the chosen workspace is not in the fresh list it is cleared and
+        the answer carries ``workspace_removed``, so the UI asks for a new
+        choice. A dead key surfaces as the usual reconnect error, a bad client
+        key as the usual fatal one — both via ``translate_ext_error``."""
+        enforce_limit(f"connect:{user_id}", settings.login_rate_per_minute, "Too many attempts.")
+        connection = await asyncio.to_thread(store.get_connection, user_id)
+        if connection is None:
+            raise api_error(401, "NOT_CONNECTED", "Connect your MCip key first.")
+        mcip = await open_mcip(user_id)
+        async with mcip:
+            try:
+                me = await mcip.me()
+            except ExtApiError as exc:
+                raise translate_ext_error(exc) from exc
+        user = me.get("user") or {}
+        key_info = me.get("key") or {}
+        client = me.get("api_client") or {}
+        workspaces = list(me.get("workspaces") or [])
+        await asyncio.to_thread(
+            store.refresh_connection_snapshot,
+            user_id,
+            display_name=user.get("display_name"),
+            email=user.get("email"),
+            api_client_name=client.get("name"),
+            expires_at=key_info.get("expires_at"),
+            workspaces=workspaces,
+        )
+        workspace_removed = False
+        if connection.get("workspace_id") is not None:
+            allowed = {int(w.get("id")): str(w.get("name") or "") for w in workspaces}
+            active_id = int(connection["workspace_id"])
+            if active_id not in allowed:
+                await asyncio.to_thread(store.set_workspace, user_id, None, None)
+                workspace_removed = True
+                logger.info(
+                    "workspace %s is gone for user=%s; workspace cleared",
+                    connection["workspace_id"],
+                    user_id,
+                )
+            elif allowed[active_id] != connection.get("workspace_name"):
+                # renamed in MCip: keep the choice, refresh the stored name
+                await asyncio.to_thread(
+                    store.set_workspace, user_id, active_id, allowed[active_id]
+                )
+        connection = await asyncio.to_thread(store.get_connection, user_id)
+        return {"connection": connection_view(connection), "workspace_removed": workspace_removed}
+
     # -- admin settings (demo admins only) ----------------------------------
 
     @app.get("/api/admin/settings")
@@ -849,9 +903,33 @@ def create_app(
 
     # -- conversations (Guide §4.3, §4.4) -----------------------------------
 
+    async def scoped_conversation(user_id: int, conversation_id: int) -> dict[str, Any]:
+        """The conversation, only when it belongs to the active workspace (#7).
+
+        Legacy rows (``workspace_id`` NULL) are adopted by the current
+        workspace first — see ``Store.adopt_orphan_conversations``. Anything
+        else is a plain 404, so a stale tab cannot send a conversation of
+        another workspace to MCip."""
+        connection = await asyncio.to_thread(store.get_connection, user_id)
+        workspace_id = connection.get("workspace_id") if connection else None
+        if workspace_id is not None:
+            await asyncio.to_thread(
+                store.adopt_orphan_conversations, user_id, int(workspace_id)
+            )
+        row = await asyncio.to_thread(store.get_conversation, user_id, conversation_id)
+        if row is None or workspace_id is None or row.get("workspace_id") != int(workspace_id):
+            raise api_error(404, "CONVERSATION_NOT_FOUND", "That conversation does not exist.")
+        return row
+
     @app.get("/api/conversations")
     async def list_conversations(user_id: UserId) -> dict[str, Any]:
-        rows = await asyncio.to_thread(store.list_conversations, user_id)
+        connection = await asyncio.to_thread(store.get_connection, user_id)
+        workspace_id = connection.get("workspace_id") if connection else None
+        if workspace_id is not None:
+            await asyncio.to_thread(
+                store.adopt_orphan_conversations, user_id, int(workspace_id)
+            )
+        rows = await asyncio.to_thread(store.list_conversations, user_id, workspace_id)
         return {"conversations": rows}
 
     @app.get("/api/conversations/{conversation_id}/messages")
@@ -860,9 +938,7 @@ def create_app(
         user_id: UserId,
         before: int | None = Query(default=None, ge=1),
     ) -> dict[str, Any]:
-        row = await asyncio.to_thread(store.get_conversation, user_id, conversation_id)
-        if row is None:
-            raise api_error(404, "CONVERSATION_NOT_FOUND", "That conversation does not exist.")
+        row = await scoped_conversation(user_id, conversation_id)
         mcip_id = row.get("mcip_conversation_id")
         if not mcip_id:
             return {"conversation_id": conversation_id, "messages": [], "has_more": False}
@@ -881,9 +957,7 @@ def create_app(
 
     @app.delete("/api/conversations/{conversation_id}", dependencies=[Depends(require_csrf)])
     async def delete_conversation(conversation_id: int, user_id: UserId) -> dict[str, Any]:
-        row = await asyncio.to_thread(store.get_conversation, user_id, conversation_id)
-        if row is None:
-            raise api_error(404, "CONVERSATION_NOT_FOUND", "That conversation does not exist.")
+        row = await scoped_conversation(user_id, conversation_id)
         mcip_id = row.get("mcip_conversation_id")
         if mcip_id:
             mcip = await open_mcip(user_id)
@@ -910,17 +984,18 @@ def create_app(
             raise api_error(401, "NOT_CONNECTED", "Connect your MCip key first.")
         if not connection.get("workspace_id"):
             raise api_error(409, "DEMO_NO_WORKSPACE", "Choose a workspace first.")
+        workspace_id = int(connection["workspace_id"])
 
         created_now = False
         if payload.conversation_id is None:
             title = payload.message.strip().splitlines()[0][:80]
-            conversation_id = await asyncio.to_thread(store.create_conversation, user_id, title)
+            conversation_id = await asyncio.to_thread(
+                store.create_conversation, user_id, title, workspace_id=workspace_id
+            )
             stored_mcip_id: int | None = None
             created_now = True
         else:
-            row = await asyncio.to_thread(store.get_conversation, user_id, payload.conversation_id)
-            if row is None:
-                raise api_error(404, "CONVERSATION_NOT_FOUND", "That conversation does not exist.")
+            row = await scoped_conversation(user_id, payload.conversation_id)
             conversation_id = int(row["id"])
             stored_mcip_id = (
                 int(row["mcip_conversation_id"]) if row.get("mcip_conversation_id") else None
@@ -949,7 +1024,7 @@ def create_app(
             try:
                 async for event in relay_turn(
                     mcip,
-                    workspace_id=int(connection["workspace_id"]),
+                    workspace_id=workspace_id,
                     message=payload.message,
                     conversation_id=mcip_conversation_id,
                     stream=payload.stream,

@@ -37,6 +37,12 @@ What it demonstrates, end to end:
 - **A working GUI.** Sign-in, workspace picker, streaming markdown with citations,
   conversation list, transcript pagination from MCip, delete, stop, light/dark theme,
   responsive drawer — as plain static files, no build step.
+- **A workspace switcher in the sidebar.** The dropdown lists what the connected key
+  may use (plain text when there is exactly one); switching scopes the conversation
+  list — chats of other workspaces stay hidden and their transcripts 404, so a stale
+  tab can never chat into the wrong workspace. **Refresh** re-reads the workspace list
+  from MCip (`GET /me`); a workspace the key lost clears the choice and reopens the
+  picker, and a snapshot older than 10 minutes is refreshed once per boot.
 - **Chat hardening.** HttpOnly session cookie, CSRF double-submit on every
   state-changing route, strict CSP (no inline code), demo-side rate limits, and a log
   filter that redacts `ss_pat_…` keys.
@@ -138,7 +144,9 @@ python -m app.admin_cli remove-user alice        # also drops their key + chats
    you are connected as, the key's expiry and the workspaces it may use — and never
    echoes the key. A wrong paste (e.g. a full-access key) shows the exact
    `errorCode` and the fix next to it.
-3. **Choose a workspace** from the key's list.
+3. **Choose a workspace** from the key's list — the sidebar dropdown switches later
+   (each workspace keeps its own conversations), and **Refresh** re-reads the list
+   from MCip.
 4. **Ask a question.** The answer streams in as markdown; status lines appear while the
    agent works; citations from your MCip documents are listed under the answer.
 5. **Send a second question** in the same chat, then start a **New chat** — the sidebar
@@ -166,7 +174,7 @@ python -m app.admin_cli remove-user alice        # also drops their key + chats
 | `app/admin_cli.py` | `demo-admin` user management. | — |
 | `static/app.js` / `static/chat.js` | The GUI: session boot, API calls, the chat state machine (SSE parsing, retry UI, replay notice). | — |
 | `tests/fake_mcip.py` | A scriptable fake MCip (ASGI app): SSE scripts, error queues, idempotent replay — no network needed. | — |
-| `tests/` | The suite: relay semantics, error table, key storage, CSRF/API, admin CLI. | — |
+| `tests/` | The suite: relay semantics, error table, key storage, CSRF/API, admin CLI, workspace scoping (plus opt-in browser checks). | — |
 | `docs/integration-guide.md` | The full API guide this demo implements, in-repo. | all |
 | `docs/deploy-cloudflare-tunnel.md` | Runbook for exposing the demo on a hostname via Cloudflare Tunnel + Access. | §7 |
 
@@ -195,14 +203,26 @@ the parts to copy into your own caller backend.
 ## Tests
 
 ```bash
-uv run pytest                 # 70 tests, ~7 s, no network
+uv run pytest                 # the suite, no network
 uv run ruff check .           # lint
 ```
 
 The suite runs the demo app and MCip (a scriptable fake, `tests/fake_mcip.py`) against
 each other over in-process ASGI transports — SSE replay semantics, retry budgets, the
-error table, Fernet storage, CSRF, the CLI. A live check against a real deployment is
-opt-in:
+error table, Fernet storage, CSRF, the CLI, workspace scoping.
+
+The workspace switcher is also verified in a real browser (opt-in — Playwright and
+its Chromium build are not part of the default dev environment):
+
+```bash
+uv sync --group browser
+uv run playwright install chromium
+uv run pytest -m browser -v   # switching, refresh, streaming lock, a11y
+```
+
+Those tests run the demo app on a loopback port, seed the session cookie, and drive
+headless Chromium against it; MCip stays the in-process fake, so nothing touches the
+network. A live check against a real deployment is opt-in too:
 
 ```bash
 MCIP_SMOKE_BASE_URL=https://mcip.example.com \

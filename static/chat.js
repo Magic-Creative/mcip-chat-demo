@@ -18,6 +18,23 @@ import DOMPurify from './vendor/purify.es.mjs';
 
 const HINT_ENTER = 'Enter sends — Shift+Enter adds a line';
 
+/** The one advice line for "this key has no usable workspace", shown by the
+    sidebar control and by the workspace picker (app.js imports it). */
+export const NO_WORKSPACE_ADVICE =
+  'This key can not use any workspace yet. The user must be in the API ' +
+  "client's organization, with chat access to one of its workspaces.";
+
+/** Refetch the workspace list on boot when the stored snapshot is older than
+    this; the sidebar's Refresh button does it on demand. */
+const WORKSPACES_MAX_AGE_MS = 10 * 60 * 1000;
+
+function workspaceSnapshotIsStale(connection) {
+  const updated = connection.workspaces_updated_at;
+  if (!updated) return true;
+  const moment = Date.parse(updated);
+  return Number.isNaN(moment) || Date.now() - moment > WORKSPACES_MAX_AGE_MS;
+}
+
 /** Render assistant Markdown, then sanitize: model output is untrusted. */
 function markdownToHtml(text) {
   const html = marked.parse(text, { breaks: true, gfm: true, async: false });
@@ -110,6 +127,9 @@ export class Chat {
     this.currentId = null;
     this.turn = null; // the in-flight turn, if any
     this.pendingRetry = null; // timer id of a scheduled auto-retry
+    this.refreshing = false; // POST /api/connection/refresh in flight
+    this.switching = false; // PUT /api/connection/workspace in flight
+    this.autoRefreshDone = false; // at most one auto GET /me per page load
 
     this.els = {
       messages: $('messages'),
@@ -126,6 +146,12 @@ export class Chat {
       scrim: $('scrim'),
       chatLayout: $('view-chat'),
       drawerToggle: $('drawer-toggle'),
+      workspaceSelect: $('workspace-select'),
+      workspaceName: $('workspace-name'),
+      workspaceEmpty: $('workspace-empty'),
+      workspaceRefresh: $('workspace-refresh'),
+      workspaceRow: $('workspace-row'),
+      workspaceStatus: $('workspace-status'),
     };
 
     this.els.composer.addEventListener('submit', (event) => {
@@ -143,17 +169,24 @@ export class Chat {
     this.els.newChat.addEventListener('click', () => this.newChat());
     this.els.drawerToggle.addEventListener('click', () => this.toggleDrawer());
     this.els.scrim.addEventListener('click', () => this.closeDrawer());
+    this.els.workspaceSelect.addEventListener('change', () => {
+      const value = Number(this.els.workspaceSelect.value);
+      if (value) this.switchWorkspace(value);
+    });
+    this.els.workspaceRefresh.addEventListener('click', () => this.refreshWorkspaces());
   }
 
   /* -- lifecycle ----------------------------------------------------------- */
 
   async activate() {
+    this.renderWorkspaceControl();
     this.renderConnectionSummary();
     try {
       await this.refreshConversations();
     } catch (error) {
       this.showListError(error);
     }
+    await this.autoRefreshWorkspaces();
   }
 
   deactivate() {
@@ -193,6 +226,7 @@ export class Chat {
     this.els.send.disabled = busy;
     this.els.stop.hidden = !busy;
     this.els.input.setAttribute('aria-busy', busy ? 'true' : 'false');
+    this.updateWorkspaceControls();
   }
 
   /* -- conversation list --------------------------------------------------- */
@@ -208,6 +242,162 @@ export class Chat {
   showListError(error) {
     this.els.listError.textContent = error.fullText || String(error);
     this.els.listError.hidden = false;
+  }
+
+  /** Errors from the sidebar controls: the backend's `ui` state decides. */
+  handleSidebarError(error) {
+    if (error instanceof this.ApiError) {
+      if (error.ui === 'auth') return this.sessionExpired(error.fullText);
+      if (error.ui === 'reconnect') return this.handleReconnect(error.fullText);
+      if (error.ui === 'workspace') {
+        this.renderWorkspaceControl();
+        return this.openWorkspacePicker(error);
+      }
+    }
+    this.showListError(error);
+  }
+
+  /* -- workspace switcher -------------------------------------------------- */
+
+  /** Rebuild the sidebar control from state.connection: a select for several
+      workspaces, plain text for exactly one, the no-workspace advice for none. */
+  renderWorkspaceControl() {
+    const connection = this.state.connection;
+    const workspaces = (connection && connection.workspaces) || [];
+    const active = connection && connection.workspace ? connection.workspace : null;
+    const { workspaceSelect: select, workspaceName: name, workspaceEmpty: empty } = this.els;
+    select.replaceChildren();
+    if (workspaces.length > 1) {
+      for (const workspace of workspaces) {
+        const option = document.createElement('option');
+        option.value = String(workspace.id);
+        option.textContent = workspace.name;
+        select.append(option);
+      }
+      if (active) select.value = String(active.id);
+      select.hidden = false;
+      name.hidden = true;
+    } else {
+      select.hidden = true;
+      name.textContent = active ? active.name : workspaces.length === 1 ? workspaces[0].name : '';
+      name.hidden = !name.textContent;
+    }
+    empty.textContent = workspaces.length === 0 ? NO_WORKSPACE_ADVICE : '';
+    empty.hidden = workspaces.length > 0;
+    this.updateWorkspaceControls();
+  }
+
+  /** Lock the switcher while a turn runs (the same lock as New chat) or while
+      a switch / refresh is in flight; spin the Refresh button while loading. */
+  updateWorkspaceControls() {
+    const { workspaceSelect: select, workspaceRefresh: refresh, workspaceRow: row } = this.els;
+    const locked = Boolean(this.turn) || this.refreshing || this.switching;
+    select.disabled = locked;
+    refresh.disabled = locked;
+    refresh.classList.toggle('spinning', this.refreshing);
+    refresh.setAttribute('aria-busy', this.refreshing ? 'true' : 'false');
+    const wait = this.turn ? 'Wait for the answer, or press Stop' : '';
+    row.title = wait;
+    select.title = wait;
+    refresh.title = wait;
+  }
+
+  setWorkspaceStatus(text) {
+    this.els.workspaceStatus.textContent = text;
+  }
+
+  /** Refresh once per page load when the stored workspace list is old. */
+  async autoRefreshWorkspaces() {
+    if (this.autoRefreshDone || !this.state.connection || this.turn) return;
+    if (!workspaceSnapshotIsStale(this.state.connection)) return;
+    this.autoRefreshDone = true;
+    await this.refreshWorkspaces({ silent: true });
+  }
+
+  /** POST /api/connection/refresh: re-read the workspace list and the key's
+      details from MCip. A vanished active workspace clears it and reopens
+      the picker. */
+  async refreshWorkspaces({ silent = false } = {}) {
+    if (this.refreshing || this.switching || this.turn) {
+      this.renderWorkspaceControl(); // snap a changed select back
+      return;
+    }
+    this.refreshing = true;
+    this.updateWorkspaceControls();
+    if (!silent) this.setWorkspaceStatus('Refreshing…');
+    try {
+      const result = await this.api('/api/connection/refresh', { method: 'POST', csrf: true });
+      this.state.connection = result.connection;
+      this.renderConnectionSummary();
+      if (result.workspace_removed) {
+        this.resetChat();
+        this.renderWorkspaceControl();
+        this.setWorkspaceStatus('');
+        this.openWorkspacePicker(
+          new Error(
+            'The workspace this chat used is no longer available. Pick a workspace to continue.',
+          ),
+        );
+        return;
+      }
+      this.renderWorkspaceControl();
+      this.setWorkspaceStatus('Updated just now');
+    } catch (error) {
+      this.setWorkspaceStatus('');
+      this.handleSidebarError(error);
+    } finally {
+      this.refreshing = false;
+      this.updateWorkspaceControls();
+    }
+  }
+
+  /** The select's change handler: switch the active workspace, then show that
+      workspace's conversations. The open chat belongs to the old one. */
+  async switchWorkspace(workspaceId) {
+    const connection = this.state.connection;
+    if (this.turn || this.refreshing || this.switching) {
+      this.renderWorkspaceControl(); // snap the select back
+      return;
+    }
+    if (!connection || (connection.workspace && connection.workspace.id === workspaceId)) return;
+    this.switching = true;
+    this.updateWorkspaceControls();
+    this.setWorkspaceStatus('Switching…');
+    try {
+      const { connection: updated } = await this.api('/api/connection/workspace', {
+        method: 'PUT',
+        body: { workspace_id: workspaceId },
+        csrf: true,
+      });
+      this.state.connection = updated;
+      this.resetChat();
+      this.renderWorkspaceControl();
+      this.renderConnectionSummary();
+      this.closeDrawer();
+      this.setWorkspaceStatus('');
+      try {
+        await this.refreshConversations();
+      } catch (error) {
+        this.showListError(error);
+      }
+    } catch (error) {
+      this.setWorkspaceStatus('');
+      this.renderWorkspaceControl(); // snap the select back to the active workspace
+      this.handleSidebarError(error);
+    } finally {
+      this.switching = false;
+      this.updateWorkspaceControls();
+    }
+  }
+
+  /** Drop the open chat and its list — used when the workspace changes. */
+  resetChat() {
+    this.cancelPendingRetry();
+    this.currentId = null;
+    this.conversations = [];
+    this.clearMessages();
+    this.renderConversations();
+    this.setStatus('');
   }
 
   async refreshConversations() {

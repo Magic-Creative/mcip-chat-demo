@@ -23,6 +23,7 @@ and answers 500 ``INTERNAL_ERROR``.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections import deque
 from typing import Any
@@ -79,6 +80,9 @@ class FakeMcip:
         self.deleted: list[int] = []
         self.me_error: tuple[int, dict[str, Any]] | None = None
         self.me_payload: dict[str, Any] = DEFAULT_ME
+        #: Seconds to sleep before each SSE event — a slow turn for the
+        #: browser tests (the streaming state stays observable).
+        self.pacing = 0.0
         self.app = self._build()
 
     # -- scripting -----------------------------------------------------------
@@ -121,6 +125,7 @@ class FakeMcip:
         self.required_client_key = None
         self.valid_client_key = None
         self.client_key_in_grace = False
+        self.pacing = 0.0
 
     # -- the ASGI app --------------------------------------------------------
 
@@ -203,6 +208,8 @@ class FakeMcip:
 
             async def stream():
                 for event in events:
+                    if self.pacing:
+                        await asyncio.sleep(self.pacing)
                     if "event" not in event:
                         # A comment frame, e.g. {"comment": "keep-alive"} — what
                         # MCip sends after 15 s of silence (Guide §7).

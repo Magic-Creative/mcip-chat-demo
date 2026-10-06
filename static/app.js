@@ -2,7 +2,7 @@
    workspace picker, theming and view routing. The chat itself lives in
    chat.js. No inline script (the page's CSP forbids it). */
 
-import { Chat } from './chat.js';
+import { Chat, NO_WORKSPACE_ADVICE } from './chat.js';
 
 const THEME_KEY = 'mcip-demo-theme';
 const THEME_CYCLE = ['auto', 'light', 'dark'];
@@ -188,9 +188,7 @@ function showWorkspacePicker(error) {
   if (workspaces.length === 0) {
     const item = document.createElement('li');
     item.className = 'muted';
-    item.textContent =
-      'This key can not use any workspace yet. The user must be in the API ' +
-      "client's organization, with chat access to one of its workspaces.";
+    item.textContent = NO_WORKSPACE_ADVICE;
     list.append(item);
   }
   for (const workspace of workspaces) {

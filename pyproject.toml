@@ -33,9 +33,13 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "smoke: hits a live MCip deployment (needs MCIP_SMOKE_* env); skipped by default",
+    "browser: drives headless Chromium against the demo app (needs the browser group); skipped when Playwright or Chromium is missing",
 ]
 
 [dependency-groups]
+browser = [
+    "playwright==1.63.0",
+]
 dev = [
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",

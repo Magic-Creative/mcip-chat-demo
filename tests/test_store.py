@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -41,11 +42,11 @@ def test_delete_user_cascades(store: Store):
         expires_at=None,
         workspaces=[{"id": 11, "name": "Chat Demo"}],
     )
-    store.create_conversation(user_id, "Hello")
+    store.create_conversation(user_id, "Hello", workspace_id=11)
     assert store.delete_user("alice")
     assert store.get_user("alice") is None
     assert store.get_connection(user_id) is None
-    assert store.list_conversations(user_id) == []
+    assert store.list_conversations(user_id, 11) == []
     assert not store.delete_user("alice")
 
 
@@ -130,16 +131,38 @@ def test_wrong_encryption_key_drops_the_connection(settings, tmp_path):
 
 def test_conversation_crud(store: Store):
     user_id = store.create_user("alice", "password123")
-    first = store.create_conversation(user_id, "First")
-    second = store.create_conversation(user_id, "Second")
+    first = store.create_conversation(user_id, "First", workspace_id=11)
+    second = store.create_conversation(user_id, "Second", workspace_id=11)
     store.set_mcip_conversation_id(user_id, first, 900)
     store.touch_conversation(user_id, first)
-    rows = store.list_conversations(user_id)
+    rows = store.list_conversations(user_id, 11)
     assert [row["id"] for row in rows] == [first, second]
     assert rows[0]["mcip_conversation_id"] == 900
     assert store.get_conversation(user_id, second)["title"] == "Second"
     assert store.delete_conversation(user_id, second)
     assert store.get_conversation(user_id, second) is None
+
+
+def test_conversations_are_scoped_to_a_workspace(store: Store):
+    user_id = store.create_user("alice", "password123")
+    chat = store.create_conversation(user_id, "In 11", workspace_id=11)
+    store.create_conversation(user_id, "In 12", workspace_id=12)
+    assert [row["id"] for row in store.list_conversations(user_id, 11)] == [chat]
+    assert [row["title"] for row in store.list_conversations(user_id, 12)] == ["In 12"]
+    # no workspace chosen: nothing is listed — rows are never mixed
+    assert store.list_conversations(user_id, None) == []
+
+
+def test_legacy_conversations_are_adopted_by_a_workspace(store: Store):
+    user_id = store.create_user("alice", "password123")
+    legacy = store.create_conversation(user_id, "Old", workspace_id=11)
+    with sqlite3.connect(store.db_path) as connection:  # as they were before #7
+        connection.execute("UPDATE conversations SET workspace_id = NULL WHERE id = ?", (legacy,))
+    assert store.list_conversations(user_id, 11) == []  # hidden until a workspace is known
+    assert store.adopt_orphan_conversations(user_id, 11) == 1
+    assert store.adopt_orphan_conversations(user_id, 11) == 0  # no-op afterwards
+    rows = store.list_conversations(user_id, 11)
+    assert [row["id"] for row in rows] == [legacy]
 
 
 def test_redact_and_prefix():
