@@ -775,3 +775,39 @@ textarea {
 #settings-status {
   white-space: pre-line;
 }
+
+/* -- developer info ------------------------------------------------------- */
+
+#info-button {
+  margin-top: 0.4rem;
+}
+
+#sidebar-guide {
+  margin: 0.5rem 0 0;
+}
+
+.info-list {
+  margin: 1rem 0 0;
+}
+
+.info-list dt {
+  margin-top: 0.8rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.info-list dt:first-child {
+  margin-top: 0;
+}
+
+.info-list dd {
+  margin: 0.15rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.info-list dd p {
+  margin: 0.15rem 0 0;
+}

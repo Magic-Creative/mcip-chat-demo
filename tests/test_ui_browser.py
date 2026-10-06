@@ -255,3 +255,49 @@ async def test_the_control_is_labelled_and_keyboard_reachable(
         await expect(page.locator(".conversation-title")).to_have_text(["In 12"])
     finally:
         await context.close()
+
+
+async def test_developer_info_shows_configuration_with_prefixes_only(
+    live_url: str, browser: Browser, store: Store
+) -> None:
+    store.create_user("alice", "password123")
+    store.set_client_key("ss_cli_demo0000000000000000", updated_by="admin")
+    context = await signed_in_context(browser, live_url, "alice")
+    try:
+        page = await open_chat(context, live_url)
+        await page.click("#info-button")
+        await expect(page.locator("#view-info")).to_be_visible()
+        info = page.locator("#info-list")
+        await expect(info).to_contain_text("http://mcip.test")
+        await expect(info).to_contain_text("ss_cli_demo00000\u2026")
+        await expect(info).to_contain_text("ss_pat_demo000000\u2026")
+
+        html = await page.content()
+        assert "ss_cli_demo0000000000000000" not in html
+        assert "ss_pat_test_only" not in html
+
+        await page.click("#info-close")
+        await expect(page.locator("#view-chat")).to_be_visible()
+    finally:
+        await context.close()
+
+
+async def test_the_developer_guide_is_linked_for_signed_out_and_in_users(
+    live_url: str, browser: Browser, store: Store
+) -> None:
+    store.create_user("alice", "password123")
+    context = await browser.new_context()
+    try:
+        page = await context.new_page()
+        await page.goto(live_url + "/")
+        await expect(page.locator("#view-auth")).to_be_visible()
+        await expect(page.locator('#view-auth a[href$="wiki/Developer-Guide"]')).to_be_visible()
+    finally:
+        await context.close()
+
+    signed_in = await signed_in_context(browser, live_url, "alice")
+    try:
+        page = await open_chat(signed_in, live_url)
+        await expect(page.locator('#sidebar-guide a[href$="wiki/Developer-Guide"]')).to_be_visible()
+    finally:
+        await signed_in.close()

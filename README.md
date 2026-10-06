@@ -37,6 +37,11 @@ What it demonstrates, end to end:
 - **A working GUI.** Sign-in, workspace picker, streaming markdown with citations,
   conversation list, transcript pagination from MCip, delete, stop, light/dark theme,
   responsive drawer — as plain static files, no build step.
+- **Developer info in the sidebar.** A *Developer info* page lists the MCip base
+  URL, the system (API client) key prefix and your own key prefix — the same
+  16 characters MCip shows, never the full keys — plus the connection details your
+  key carries. The wiki's Developer Guide is linked from the sign-in and connect
+  cards and from the chat sidebar.
 - **A workspace switcher in the sidebar.** The dropdown lists what the connected key
   may use (plain text when there is exactly one); switching scopes the conversation
   list — chats of other workspaces stay hidden and their transcripts 404, so a stale

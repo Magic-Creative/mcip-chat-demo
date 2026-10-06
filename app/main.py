@@ -536,6 +536,12 @@ def create_app(
                 body["connection"] = connection_view(
                     await asyncio.to_thread(store.get_connection, user_id)
                 )
+                # For the signed-in developer info view. The client key itself
+                # stays server-side — only the same 16-char prefix admins see.
+                body["mcip_base_url"] = base_url or None
+                body["client_key_prefix"] = await asyncio.to_thread(
+                    store.get_setting, SETTING_CLIENT_KEY_PREFIX
+                )
         token = issue_csrf(request)
         body["csrf_token"] = token
         response = JSONResponse(body)
