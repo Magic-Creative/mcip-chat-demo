@@ -215,20 +215,23 @@ Some add fields: `retry_after_ms` (429, 409 busy) and `continue_url` (409 awaiti
 | 403 | `WORKSPACE_FORBIDDEN` | Not a member, the workspace is another org's (or personal), or the workspace doesn't exist. | Re-read `GET /me` and let the user pick again. |
 | 403 | `FORBIDDEN` | The user's workspace role lacks the chat permission (create/read/delete chats). | Ask a workspace admin to change the role. |
 | 403 | `WORKSPACE_PERMISSION_DENIED` | (Knowledge base) The user's workspace role lacks the permission the operation needs. | Ask a workspace admin to change the role (§14). |
+| 403 | `FOLDER_READ_ONLY` / `DOCUMENT_READ_ONLY` | (Knowledge base) The folder or document is managed by an external connector and read-only through the API. | Work in folders you manage; change connector-synced content in the source system (§14). |
 | 403 | `INSUFFICIENT_SCOPE` | (Knowledge base & Admin) The key's `ext_scopes` or the client's `allowed_user_scopes` lack the scope the route needs (§14); or the client key's `admin_scopes` lack the admin scope (§15). | Use a key with that scope (§2), or ask the MCip admin to widen the client. |
 | 403 | `API_CLIENT_ADMIN_NOT_ALLOWED` | (Admin) Admin routes need the client to have **Require client key** on AND a non-empty IP allowlist. | Ask the MCip admin to satisfy both (§15). |
-| 403 | `ROLE_ABOVE_CEILING` | (Admin) The role to grant is above the client's `max_grant_role`. | Grant a lower role, or ask the admin to raise the ceiling (§15). |
+| 403 | `ROLE_ABOVE_CEILING` | (Admin) The role to grant — or a member's current access — is above the client's `max_grant_role`. | Grant a lower role, or ask the admin to raise the ceiling (§15). |
+| 403 | `USER_IS_PLATFORM_ADMIN` | (Admin) A platform administrator's activation can't be changed through the Admin API. | Change it in the MCip Admin portal if truly needed (§15). |
 | 404 | `CONVERSATION_NOT_FOUND` | Unknown conversation, another user's, or another workspace's. | Start a new conversation (`conversation_id: null`). |
 | 404 | `DOCUMENT_NOT_FOUND` / `FOLDER_NOT_FOUND` | (Knowledge base) Unknown id, or one from another workspace. | Re-read the document or folder list (§14). |
 | 404 | `USER_NOT_FOUND` / `WORKSPACE_NOT_FOUND` / `ROLE_NOT_FOUND` | (Admin) Unknown id, another tenant's, or a role name that doesn't exist in the workspace. | Re-read the matching list (§15). |
 | 409 | `CONVERSATION_BUSY` | A turn is still running on this conversation, or a request with the same `client_request_id` is still running. | Wait `retry_after_ms` (or `Retry-After`) and retry with the same `client_request_id`. |
 | 409 | `CONVERSATION_AWAITING_APPROVAL` | The conversation has an approval pending from MCip's UI. | Show `message` and a link to `continue_url`; the user approves or rejects in MCip. Don't retry until then. |
 | 409 | `DOCUMENT_BUSY` | (Knowledge base) The document is mid-processing; this operation can't run yet. | Wait `retry_after_ms` and retry (§14). |
-| 409 | `IDEMPOTENCY_CONFLICT` | (Knowledge base) An upload replayed an `Idempotency-Key` with a different payload. | Retry with a fresh `Idempotency-Key`. |
+| 409 | `IDEMPOTENCY_CONFLICT` | (Knowledge base & Admin) A replay carried a different payload: an upload `Idempotency-Key` with different content (§14.1), or a user `external_id` whose account has a different email (§15.3). | Retry with a fresh key, or with data matching the first request. |
 | 409 | `FOLDER_NOT_EMPTY` | (Knowledge base) The folder still contains documents or subfolders. | Move or delete its contents first (§14). |
+| 409 | `FOLDER_NAME_CONFLICT` | (Knowledge base) A folder with this name already exists at that location (create or rename). | Rename it or pick another name (§14). |
 | 409 | `USER_EXISTS_OUTSIDE_ORG` | (Admin) The email belongs to an account outside this organization; nothing is returned. | Contact the MCip admin — the API never links such accounts (§15). |
 | 409 | `EXTERNAL_ID_CONFLICT` | (Admin) The `external_id` is already linked to another account. | Continue with the account it is linked to. |
-| 409 | `USER_IN_OTHER_ORGS` | (Admin) Deactivation or org removal refused: the user also belongs to other organizations. | Remove those memberships first (§15). |
+| 409 | `USER_IN_OTHER_ORGS` | (Admin) Deactivation refused: the user also belongs to other organizations. | Remove them from your organization instead (`DELETE …/membership`, §15). |
 | 409 | `OWNER_IMMUTABLE` | (Admin) An organization owner can't be deactivated, removed, or granted a workspace role by the Admin API. | Change it in the MCip Admin portal if truly needed. |
 | 409 | `LAST_ADMIN` | (Admin) The change would leave the organization without any admin. | Grant another admin first. |
 | 409 | `MEMBERSHIP_MANAGED` | (Admin) The membership is derived from the organization or a group; manage it where it was granted. | — |
@@ -398,7 +401,7 @@ The same user key and base URL as chat (§3), under `/api/v1/ext/workspaces/{wor
 
 **List** filters: `folder_id` (only documents directly in that folder), `q` (substring of the title, ≤ 500 chars), `state` (`pending` / `processing` / `ready` / `failed`), `page` (1-based) and `page_size` (≤ 100, default 50). Rows being deleted are hidden.
 
-**Upload** sends exactly one file per request: multipart fields `file`, optional `folder_id`, optional `processing_mode` (`basic`, the default, or `premium`). It answers `202` with the new document in `pending` — parsing and embedding run in the background. A file with the same name in the same folder **replaces** the existing document. Send an `Idempotency-Key` header (≤ 200 chars) so a retry replays the first `202` instead of uploading twice; the key is kept for 24 h, and reusing it with a different payload answers `409 IDEMPOTENCY_CONFLICT`. Uploads have their own rate bucket (§12 → `429 RATE_LIMITED`), and an oversized file answers `413 FILE_TOO_LARGE`.
+**Upload** sends exactly one file per request: multipart fields `file`, optional `folder_id`, optional `processing_mode` (`basic`, the default, or `premium`). It answers `202` with the new document in `pending` — parsing and embedding run in the background. A file with the same name in the same folder **replaces** the existing document. Send an `Idempotency-Key` header (≤ 200 chars) so a retry replays the first `202` instead of uploading twice — a finished key replays for 24 h, and reusing it with a different payload answers `409 IDEMPOTENCY_CONFLICT`. A **failed or interrupted** upload releases its key (an interrupted one after ~2 min), so retrying it runs the upload again. Uploading into a connector-managed folder answers `403 FOLDER_READ_ONLY`. Uploads have their own rate bucket (§12 → `429 RATE_LIMITED`), and an oversized file answers `413 FILE_TOO_LARGE`.
 
 **Statuses** is the poll target: `ids` is a comma-separated list of **at most 100** document ids of this workspace; unknown ids are simply absent, never errors. Poll every few seconds until `ready` — or `failed`, with `status_reason` set.
 
@@ -419,7 +422,7 @@ A document is:
 }
 ```
 
-**Delete** answers `202` `{"document_id": 3381, "status": "deleting"}`; the document leaves lists and search at once and is gone once the cascade ends. While it is still indexing or already deleting you get `409 DOCUMENT_BUSY` (wait `retry_after_ms` and retry).
+**Delete** answers `202` `{"document_id": 3381, "status": "deleting"}`; the document leaves lists and search at once and is gone once the cascade ends. While it is still indexing or already deleting you get `409 DOCUMENT_BUSY` (wait `retry_after_ms` and retry). A connector-managed document answers `403 DOCUMENT_READ_ONLY`.
 
 ### 14.2 Folders
 
@@ -430,7 +433,7 @@ A document is:
 | Rename or move | `PATCH …/folders/{id}` | `kb:write` |
 | Delete (empty only) | `DELETE …/folders/{id}` | `kb:delete` |
 
-Folders come as a flat list ordered by the opaque `position` string (sort by it; `id`, `name`, `parent_id` round it out). `POST` takes `{name, parent_id?}` — a duplicate name at the same location is `409 CONFLICT` — and also accepts `Idempotency-Key` with the upload's replay semantics. `PATCH` takes `{name?, parent_id?}`: **omitting** `parent_id` keeps the parent, `"parent_id": null` moves the folder to the workspace root; an empty body is `400 VALIDATION_ERROR`. `DELETE` is synchronous and only for **empty** folders: one that still has direct child documents or subfolders answers `409 FOLDER_NOT_EMPTY` (a document still being deleted keeps the folder non-empty), and a successful delete answers `{"folder_id": 34, "deleted": true}`.
+Folders come as a flat list ordered by the opaque `position` string (sort by it; `id`, `name`, `parent_id` round it out). `POST` takes `{name, parent_id?}` — a duplicate name at the same location is `409 FOLDER_NAME_CONFLICT` — and also accepts `Idempotency-Key` with the upload's replay semantics. `PATCH` takes `{name?, parent_id?}`: **omitting** `parent_id` keeps the parent, `"parent_id": null` moves the folder to the workspace root; renaming onto an existing name is also `409 FOLDER_NAME_CONFLICT`, and an empty body is `400 VALIDATION_ERROR`. `DELETE` is synchronous and only for **empty** folders: one that still has direct child documents or subfolders answers `409 FOLDER_NOT_EMPTY` (a document still being deleted keeps the folder non-empty), and a successful delete answers `{"folder_id": 34, "deleted": true}`. Connector-managed folders are read-only: creating inside one, renaming or moving it, or deleting it answers `403 FOLDER_READ_ONLY`.
 
 ### 14.3 Search
 
@@ -521,9 +524,9 @@ The list is ordered by name (`q` filters by substring, `external_id` resolves th
 | Grant a role | `PUT /admin/workspaces/{ws}/members/{user_id}` | `members:write` |
 | Remove a member | `DELETE /admin/workspaces/{ws}/members/{user_id}` | `members:write` |
 
-Roles come as `{id, name, is_system_role, permissions, grantable}` — `grantable` says whether **your client** may grant it. Each API client has a **grant ceiling** (`max_grant_role`): granting a role above it answers `403 ROLE_ABOVE_CEILING`, and the Owner role is never grantable (`409 OWNER_IMMUTABLE`).
+Roles come as `{id, name, is_system_role, permissions, grantable}` — `grantable` says whether **your client** may grant it. Each API client has a **grant ceiling** (`max_grant_role`): granting a role above it answers `403 ROLE_ABOVE_CEILING`, and so does changing or removing a member whose current access already sits above it (a co-owner, or a `*`-permission role); the Owner role is never grantable (`409 OWNER_IMMUTABLE`).
 
-`PUT` upserts the user's **direct** membership with `{"role": "<name>"}` (role names resolve case-sensitively within the workspace, `404 ROLE_NOT_FOUND`) and answers `201` when created, `200` when changed. A membership derived from the organization or a group is refused with `409 MEMBERSHIP_MANAGED` — manage it where it was granted. `DELETE` removes the direct membership row (`204`; removing one that doesn't exist is a no-op) and is refused for the owner (`409 OWNER_IMMUTABLE`).
+`PUT` upserts the user's **direct** membership with `{"role": "<name>"}` (role names resolve case-sensitively within the workspace, `404 ROLE_NOT_FOUND`) and answers `201` when created, `200` when changed. A membership derived from the organization or a group is refused with `409 MEMBERSHIP_MANAGED` — manage it where it was granted. `DELETE` removes the direct membership row (`204`; a user with no direct membership row answers `404 USER_NOT_FOUND`) and is refused for the owner (`409 OWNER_IMMUTABLE`).
 
 Pages of members: `{items, page, page_size, total}` with `{user_id, email, role, source, is_co_owner, joined_at}`, where `source` is `owner` (the workspace's owner), `direct` (granted in this workspace), or `org` / `group` (derived).
 
@@ -539,11 +542,11 @@ Pages of members: `{items, page, page_size, total}` with `{user_id, email, role,
 
 Only users of **your** organization are visible; another tenant's user answers `404 USER_NOT_FOUND`. A user is `{id, email, display_name, is_active, org_role, external_id, created_at, last_login}` with `org_role` `owner` / `member` / `billing`; the list offers `q` (matches email or display name) and `external_id` filters plus `page` / `page_size`.
 
-**Provision** takes `{email, display_name?, external_id?}`: it creates the MCip account (unverified, random password, never returned), adds it to your organization and **emails a set-password link**, so the user activates it at their leisure — unless the organization has an SSO provider enabled, in which case no email is sent. An email on a domain the organization blocks answers `400 EMAIL_DOMAIN_NOT_ALLOWED`. A repeated `external_id`, or an email already in your org, answers `200` with the existing user (linked to your `external_id` if it wasn't yet) and changes nothing else; an account that exists **outside** your org answers `409 USER_EXISTS_OUTSIDE_ORG` with no data — the API never takes over such an account. If the account was created but the email could not be sent, the call answers `503 EMAIL_DELIVERY_FAILED`: retry the same request, which re-links the user and re-sends the email.
+**Provision** takes `{email, display_name?, external_id?}`: it creates the MCip account (unverified, random password, never returned), adds it to your organization and **emails a set-password link**, so the user activates it at their leisure — unless the organization has an SSO provider enabled, in which case no email is sent. An email on a domain the organization blocks answers `400 EMAIL_DOMAIN_NOT_ALLOWED`. A repeated `external_id`, or an email already in your org, answers `200` with the existing user (linked to your `external_id` if it wasn't yet) and changes nothing else — reusing that `external_id` with a different email is refused with `409 IDEMPOTENCY_CONFLICT`; an account that exists **outside** your org answers `409 USER_EXISTS_OUTSIDE_ORG` with no data — the API never takes over such an account. If the account was created but the email could not be sent, the call answers `503 EMAIL_DELIVERY_FAILED`: retry the same request, which re-links the user and re-sends the email.
 
-**Update** changes `display_name` (always allowed) and `is_active`. Deactivating revokes the user's sessions and API keys exactly like the Admin portal, and reactivating restores access; both are refused for organization owners (`409 OWNER_IMMUTABLE`) and for users who also belong to other organizations (`409 USER_IN_OTHER_ORGS`), and deactivating the last admin is refused (`409 LAST_ADMIN`) — promote another admin first.
+**Update** changes `display_name` (always allowed) and `is_active`. Deactivating revokes the user's sessions and API keys exactly like the Admin portal, and reactivating restores access; both are refused for organization owners (`409 OWNER_IMMUTABLE`), platform administrators (`403 USER_IS_PLATFORM_ADMIN`) and users who also belong to other organizations (`409 USER_IN_OTHER_ORGS`), and deactivating the last admin is refused (`409 LAST_ADMIN`) — promote another admin first.
 
-**Remove from org** removes the organization membership and the user's direct workspace memberships in it (`204`, owner refused). The account itself is **never deleted** — this is the offboarding call.
+**Remove from org** removes the organization membership, **every** workspace seat the user holds in the org (direct, organization-derived and group-derived alike) and their membership of the org's user groups (`204`; refused for org owners and for the owner of any workspace in the org). The account itself is **never deleted** — this is the offboarding call.
 
 Example session — create a workspace for one of your users, then grant a colleague a role on it:
 
