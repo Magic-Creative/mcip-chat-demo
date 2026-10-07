@@ -1,6 +1,6 @@
 # Guide: External Chat API Integration
 
-> For developers of an external system (the **caller**) that shows its own chat GUI and forwards its users' questions to MCip.
+> For developers of an external system (the **caller**) that shows its own chat GUI and forwards its users' questions to MCip — and, since [#1229](https://github.com/igsl-group/SurfWise/issues/1229), also **manages the organization's knowledge base and its users and workspaces** through the same API (§14, §15).
 > Contract version: v1 (`/api/v1/ext`, OpenAPI `1.0.0`). A runnable reference of every rule below ships with this demo — start from its [`README`](../README.md), whose client is [`app/mcip.py`](../app/mcip.py).
 
 ## 1. How it works
@@ -19,6 +19,7 @@ Your user ──► Your GUI ──► Your backend ── looks up this user's 
 1. **An admin registers your system as an API client.** A system admin does this at **Admin → API clients** (`/admin/api-clients`), or an organization owner does it at **Organization settings → API clients** (`/org/<slug>/settings/api-clients`). Every API client belongs to an organization — keys of the client can only reach that organization's workspaces — and the admin can pin IP ranges and set its limits. Ask the admin for the client's **name** and its **organization**; your users will pick the client.
 2. **Each user creates a key** at `/user-settings/api-key` → **Create API key**:
    - **Use for:** `External system: <your client name>`. This makes a *chat* key: it only works on `/api/v1/ext/*`, and only for your client.
+   - **Scopes:** the form offers the knowledge-base scopes the client allows (its `allowed_user_scopes`): `kb:read`, `kb:write`, `kb:delete`. The key always includes `chat`; without a `kb:*` scope the knowledge-base routes (§14) answer `403 INSUFFICIENT_SCOPE`.
    - **Expires in days (required):** default 90, maximum 365 (or less if the deployment sets `PAT_MAX_EXPIRY_DAYS`).
    - The key (`ss_pat_…`) is shown **once**. The user pastes it into your "Connect MCip" setting.
 3. **You validate and store it.** Call `GET /api/v1/ext/me` with the key, show the user who they are connected as, let them pick a workspace from `workspaces`, and store the key as described in §11. Store `key.expires_at` too, so you can ask for a new key before it expires.
@@ -37,6 +38,12 @@ X-MCip-Client-Key: ss_cli_<…>           # your system (the API client)
 ```
 
 The **client key** authenticates your external system itself (MCip releases with API client keys; older releases ignore the header). MCip shows it once when an admin creates the API client or rotates its key (**Admin → API clients** / **Organization settings → API clients**); store it like a password on your backend, never in a browser. A rotated key keeps working for 24 hours so you can switch without downtime. While the client doesn't *require* a client key, you may omit the header, but a wrong one is always rejected. No cookie, JWT or other identity header is accepted or needed. Every response carries `X-Request-ID`; quote it (or the body's `request_id`) when you report a problem. You may send your own `X-Request-ID`, and MCip will use it.
+
+The endpoints are grouped under three tags in the OpenAPI document, and every operation's description names the scope it requires:
+
+- **Chat** — §4 and §5. The user's key, scope `chat` (every key has it).
+- **Knowledge base** — §14. The user's key with `kb:read` / `kb:write` / `kb:delete`, whichever the operation needs; the client must allow the scope too, else `403 INSUFFICIENT_SCOPE`.
+- **Admin** — §15, under `/api/v1/ext/admin/…`. **The client key alone authenticates** (no `Authorization` header — sending one gets `400 AMBIGUOUS_PRINCIPAL`); the client must have **Require client key** on, a non-empty IP allowlist and the operation's admin scope in its `admin_scopes`.
 
 ## 4. Endpoints
 
@@ -193,6 +200,7 @@ Some add fields: `retry_after_ms` (429, 409 busy) and `continue_url` (409 awaiti
 | Status | `errorCode` | Meaning | What the caller should do |
 |---|---|---|---|
 | 400 | `PROMPT_REFUSED` | The prompt-injection guard refused the message (JSON mode; in stream mode it is an `error` event). | Show `message`; let the user rephrase. Don't retry as is. |
+| 400 | `EMAIL_DOMAIN_NOT_ALLOWED` | (Admin) The email's domain is not on the organization's allowlist. | Use an address on an allowed domain (§15). |
 | 401 | `API_KEY_MISSING` | No `Authorization: Bearer ss_pat_…` header. | Fix the integration. |
 | 401 | `CLIENT_KEY_MISSING` | The API client requires a client key and `X-MCip-Client-Key` is missing. | Configure your client key. Affects every user. |
 | 401 | `CLIENT_KEY_INVALID` | The client key is unknown, revoked, past its 24 h rotation grace, or belongs to another client. | Get the current key from the MCip admin. Don't disconnect the user: their key is fine. |
@@ -206,14 +214,34 @@ Some add fields: `retry_after_ms` (429, 409 busy) and `continue_url` (409 awaiti
 | 403 | `API_ACCESS_DISABLED` | Reserved. Older MCip releases sent this when the workspace had "API key access" off; current ones never do — treat it like `WORKSPACE_FORBIDDEN` if you see it. | Re-read `GET /me` and let the user pick again. |
 | 403 | `WORKSPACE_FORBIDDEN` | Not a member, the workspace is another org's (or personal), or the workspace doesn't exist. | Re-read `GET /me` and let the user pick again. |
 | 403 | `FORBIDDEN` | The user's workspace role lacks the chat permission (create/read/delete chats). | Ask a workspace admin to change the role. |
+| 403 | `WORKSPACE_PERMISSION_DENIED` | (Knowledge base) The user's workspace role lacks the permission the operation needs. | Ask a workspace admin to change the role (§14). |
+| 403 | `FOLDER_READ_ONLY` / `DOCUMENT_READ_ONLY` | (Knowledge base) The folder or document is managed by an external connector and read-only through the API. | Work in folders you manage; change connector-synced content in the source system (§14). |
+| 403 | `INSUFFICIENT_SCOPE` | (Knowledge base & Admin) The key's `ext_scopes` or the client's `allowed_user_scopes` lack the scope the route needs (§14); or the client key's `admin_scopes` lack the admin scope (§15). | Use a key with that scope (§2), or ask the MCip admin to widen the client. |
+| 403 | `API_CLIENT_ADMIN_NOT_ALLOWED` | (Admin) Admin routes need the client to have **Require client key** on AND a non-empty IP allowlist. | Ask the MCip admin to satisfy both (§15). |
+| 403 | `ROLE_ABOVE_CEILING` | (Admin) The role to grant — or a member's current access — is above the client's `max_grant_role`. | Grant a lower role, or ask the admin to raise the ceiling (§15). |
+| 403 | `USER_IS_PLATFORM_ADMIN` | (Admin) A platform administrator's activation can't be changed through the Admin API. | Change it in the MCip Admin portal if truly needed (§15). |
 | 404 | `CONVERSATION_NOT_FOUND` | Unknown conversation, another user's, or another workspace's. | Start a new conversation (`conversation_id: null`). |
+| 404 | `DOCUMENT_NOT_FOUND` / `FOLDER_NOT_FOUND` | (Knowledge base) Unknown id, or one from another workspace. | Re-read the document or folder list (§14). |
+| 404 | `USER_NOT_FOUND` / `WORKSPACE_NOT_FOUND` / `ROLE_NOT_FOUND` | (Admin) Unknown id, another tenant's, or a role name that doesn't exist in the workspace. | Re-read the matching list (§15). |
 | 409 | `CONVERSATION_BUSY` | A turn is still running on this conversation, or a request with the same `client_request_id` is still running. | Wait `retry_after_ms` (or `Retry-After`) and retry with the same `client_request_id`. |
 | 409 | `CONVERSATION_AWAITING_APPROVAL` | The conversation has an approval pending from MCip's UI. | Show `message` and a link to `continue_url`; the user approves or rejects in MCip. Don't retry until then. |
+| 409 | `DOCUMENT_BUSY` | (Knowledge base) The document is mid-processing; this operation can't run yet. | Wait `retry_after_ms` and retry (§14). |
+| 409 | `IDEMPOTENCY_CONFLICT` | (Knowledge base & Admin) A replay carried a different payload: an upload `Idempotency-Key` with different content (§14.1), or a user `external_id` whose account has a different email (§15.3). | Retry with a fresh key, or with data matching the first request. |
+| 409 | `FOLDER_NOT_EMPTY` | (Knowledge base) The folder still contains documents or subfolders. | Move or delete its contents first (§14). |
+| 409 | `FOLDER_NAME_CONFLICT` | (Knowledge base) A folder with this name already exists at that location (create or rename). | Rename it or pick another name (§14). |
+| 409 | `USER_EXISTS_OUTSIDE_ORG` | (Admin) The email belongs to an account outside this organization; nothing is returned. | Contact the MCip admin — the API never links such accounts (§15). |
+| 409 | `EXTERNAL_ID_CONFLICT` | (Admin) The `external_id` is already linked to another account. | Continue with the account it is linked to. |
+| 409 | `USER_IN_OTHER_ORGS` | (Admin) Deactivation refused: the user also belongs to other organizations. | Remove them from your organization instead (`DELETE …/membership`, §15). |
+| 409 | `OWNER_IMMUTABLE` | (Admin) An organization owner can't be deactivated, removed, or granted a workspace role by the Admin API. | Change it in the MCip Admin portal if truly needed. |
+| 409 | `LAST_ADMIN` | (Admin) The change would leave the organization without any admin. | Grant another admin first. |
+| 409 | `MEMBERSHIP_MANAGED` | (Admin) The membership is derived from the organization or a group; manage it where it was granted. | — |
 | 413 | `REQUEST_TOO_LARGE` | Body over 64 KB. | Shorten the message. The server closes the connection. |
+| 413 | `FILE_TOO_LARGE` | (Knowledge base) The uploaded file exceeds the deployment's per-file limit. | Upload a smaller file (§14). |
 | 422 | `VALIDATION_ERROR` | A field is missing or out of range; `message` names it. | Fix the request. |
 | 429 | `RATE_LIMITED` | Per-key limit (requests/min or concurrent turns), or the deployment-wide per-IP limit. | Wait `Retry-After`, then retry (§8). |
 | 429 | `CLIENT_RATE_LIMITED` | Your API client's limit (all your users together). | Wait `Retry-After`; slow down globally. |
 | 500 | `INTERNAL_ERROR` | Unexpected server error. | Retry once with the same `client_request_id`; then report `request_id`. |
+| 503 | `EMAIL_DELIVERY_FAILED` | (Admin) The user was created but the set-password email could not be sent. | Retry the same request; it re-links the account and re-sends the email (§15). |
 
 Statuses that do not come from MCip's app (for example `502`/`503`/`504` from a proxy, or `503` when the server sheds load) may have a non-JSON body. Treat them as transient: retry with backoff.
 
@@ -329,6 +357,8 @@ The answer is markdown and cites sources as `[1]`, `[2]`, …. Each `citation` (
 | Concurrent turns per key | 3 (`EXT_API_KEY_MAX_CONCURRENT`) | `429 RATE_LIMITED` |
 | Requests per API client | set by the admin, default 600/min | `429 CLIENT_RATE_LIMITED` |
 | Concurrent turns per API client | set by the admin, default 500 | `429 CLIENT_RATE_LIMITED` |
+| Uploads per key | 60/min (deployment setting `EXT_API_UPLOAD_RATE_PER_MINUTE`), §14 | `429 RATE_LIMITED` |
+| Admin requests per API client | set by the admin, default 120/min, §15 | `429 CLIENT_RATE_LIMITED` |
 | Turns per conversation | 1 at a time | `409 CONVERSATION_BUSY` |
 | Requests per source IP | 1024/min across the deployment | `429 RATE_LIMITED` |
 | Transcript page | `limit` ≤ 100 (default 50) | `422` |
@@ -355,7 +385,196 @@ curl -N https://mcip.example.com/api/v1/ext/chat \
   -d '{"workspace_id":12,"message":"Hello","conversation_id":null,"stream":true,"client_request_id":"demo-1"}'
 ```
 
-## 14. FAQ
+## 14. Knowledge base API
+
+The same user key and base URL as chat (§3), under `/api/v1/ext/workspaces/{workspace_id}/…` and the **Knowledge base** tag in OpenAPI. The `workspace_id` must be one from `GET /me` → `workspaces` (the user a member of the client's organization, else `403 WORKSPACE_FORBIDDEN`), and the user's workspace role must carry the document permission the operation needs (else `403 WORKSPACE_PERMISSION_DENIED`). On top of that, each route needs a scope **on the key** — `kb:read`, `kb:write` or `kb:delete`, whichever is named below — **and** the client must allow it in `allowed_user_scopes`, else `403 INSUFFICIENT_SCOPE`. The user ticks these scopes when creating the key (§2); the client key header still applies like on every `/ext` route (§3).
+
+### 14.1 Documents
+
+| Operation | Route | Scope |
+|---|---|---|
+| List | `GET …/documents` | `kb:read` |
+| Upload | `POST …/documents` (multipart) | `kb:write` |
+| Statuses | `GET …/documents/status?ids=3381,3382` | `kb:read` |
+| Get one | `GET …/documents/{id}` | `kb:read` |
+| Delete | `DELETE …/documents/{id}` | `kb:delete` |
+
+**List** filters: `folder_id` (only documents directly in that folder), `q` (substring of the title, ≤ 500 chars), `state` (`pending` / `processing` / `ready` / `failed`), `page` (1-based) and `page_size` (≤ 100, default 50). Rows being deleted are hidden.
+
+**Upload** sends exactly one file per request: multipart fields `file`, optional `folder_id`, optional `processing_mode` (`basic`, the default, or `premium`). It answers `202` with the new document in `pending` — parsing and embedding run in the background. A file with the same name in the same folder **replaces** the existing document. Send an `Idempotency-Key` header (≤ 200 chars) so a retry replays the first `202` instead of uploading twice — a finished key replays for 24 h, and reusing it with a different payload answers `409 IDEMPOTENCY_CONFLICT`. A **failed or interrupted** upload releases its key (an interrupted one after ~2 min), so retrying it runs the upload again. Uploading into a connector-managed folder answers `403 FOLDER_READ_ONLY`. Uploads have their own rate bucket (§12 → `429 RATE_LIMITED`), and an oversized file answers `413 FILE_TOO_LARGE`.
+
+**Statuses** is the poll target: `ids` is a comma-separated list of **at most 100** document ids of this workspace; unknown ids are simply absent, never errors. Poll every few seconds until `ready` — or `failed`, with `status_reason` set.
+
+A document is:
+
+```json
+{
+  "id": 3381,
+  "title": "Refund Policy 2026",
+  "folder_id": 34,
+  "status": "ready",
+  "status_reason": null,
+  "content_type": "application/pdf",
+  "size_bytes": 148223,
+  "created_at": "2026-10-07T08:12:31Z",
+  "updated_at": "2026-10-07T08:13:02Z",
+  "created_by_user_id": "0b9d3c4e-…"
+}
+```
+
+**Delete** answers `202` `{"document_id": 3381, "status": "deleting"}`; the document leaves lists and search at once and is gone once the cascade ends. While it is still indexing or already deleting you get `409 DOCUMENT_BUSY` (wait `retry_after_ms` and retry). A connector-managed document answers `403 DOCUMENT_READ_ONLY`.
+
+### 14.2 Folders
+
+| Operation | Route | Scope |
+|---|---|---|
+| List | `GET …/folders` | `kb:read` |
+| Create | `POST …/folders` | `kb:write` |
+| Rename or move | `PATCH …/folders/{id}` | `kb:write` |
+| Delete (empty only) | `DELETE …/folders/{id}` | `kb:delete` |
+
+Folders come as a flat list ordered by the opaque `position` string (sort by it; `id`, `name`, `parent_id` round it out). `POST` takes `{name, parent_id?}` — a duplicate name at the same location is `409 FOLDER_NAME_CONFLICT` — and also accepts `Idempotency-Key` with the upload's replay semantics. `PATCH` takes `{name?, parent_id?}`: **omitting** `parent_id` keeps the parent, `"parent_id": null` moves the folder to the workspace root; renaming onto an existing name is also `409 FOLDER_NAME_CONFLICT`, and an empty body is `400 VALIDATION_ERROR`. `DELETE` is synchronous and only for **empty** folders: one that still has direct child documents or subfolders answers `409 FOLDER_NOT_EMPTY` (a document still being deleted keeps the folder non-empty), and a successful delete answers `{"folder_id": 34, "deleted": true}`. Connector-managed folders are read-only: creating inside one, renaming or moving it, or deleting it answers `403 FOLDER_READ_ONLY`.
+
+### 14.3 Search
+
+`POST …/workspaces/{workspace_id}/search` (scope `kb:read`) runs the same hybrid semantic + keyword retrieval as the MCip UI:
+
+```json
+{ "query": "refund policy for enterprise customers", "top_k": 5, "folder_id": null }
+```
+
+| Field | Rules |
+|---|---|
+| `query` | Required, 1–2,000 characters. Screened by the prompt guard: a refusal answers `400 PROMPT_REFUSED`. |
+| `top_k` | 1–20, default 8. |
+| `folder_id` | Optional: restrict to that folder's subtree. |
+
+```json
+{
+  "hits": [
+    { "document_id": 3381, "document_title": "Refund Policy 2026", "chunk_id": 90210,
+      "score": 0.83, "snippet": "Enterprise customers may request a refund within 30 days…" }
+  ]
+}
+```
+
+Hits are chunk-level and grouped by document, best first; each `snippet` is the chunk text truncated to a few hundred characters — enough for a preview next to a `[n]` citation from chat.
+
+A `curl` session (upload → poll → search → clean up), all with the user's key:
+
+```bash
+BASE=https://mcip.example.com/api/v1/ext/workspaces/12
+AUTH="Authorization: Bearer $MCIP_API_KEY"
+
+# 1. Upload a file into folder 34 (keep the Idempotency-Key to retry safely)
+curl -sS -X POST "$BASE/documents" -H "$AUTH" \
+  -H "Idempotency-Key: upload-refund-2026-10-07" \
+  -F "file=@refund-policy.pdf" -F "folder_id=34" -F "processing_mode=basic"
+# → 202 {"id":3381,"title":"refund-policy.pdf","folder_id":34,"status":"pending",…}
+
+# 2. Poll until ready
+curl -sS "$BASE/documents/status?ids=3381" -H "$AUTH"
+# → {"items":[{"id":3381,"title":"refund-policy.pdf","status":"ready","status_reason":null}]}
+
+# 3. Search it
+curl -sS -X POST "$BASE/search" -H "$AUTH" -H "Content-Type: application/json" \
+  -d '{"query":"refund policy enterprise","top_k":5}'
+
+# 4. Delete it
+curl -sS -X DELETE "$BASE/documents/3381" -H "$AUTH"
+# → 202 {"document_id":3381,"status":"deleting"}
+```
+
+## 15. Admin API
+
+The Admin API (`/api/v1/ext/admin/…`, tag **Admin**) is for your backend only: it manages your organization's **users**, **workspaces** and their **members**, with no user key involved — you provision a user and MCip emails them a set-password link, ready to be one of your chat users (§2). It authenticates with the **client key alone**:
+
+```http
+GET /api/v1/ext/admin/workspaces
+X-MCip-Client-Key: ss_cli_<…>
+```
+
+- **No `Authorization` header.** Sending one answers `400 AMBIGUOUS_PRINCIPAL`: a request must not mix "acting as a user" with "acting as the system".
+- The client must be admin-capable: **Require client key** on AND a non-empty **IP allowlist**, else `403 API_CLIENT_ADMIN_NOT_ALLOWED`. The allowlist itself still applies (`403 API_CLIENT_IP_DENIED`).
+- Each operation needs its scope in the client's **admin scopes**, else `403 INSUFFICIENT_SCOPE`: `workspaces:read`, `workspaces:write`, `members:write`, `users:read`, `users:write`. Ask the MCip admin to set them.
+- Admin calls have their own rate bucket: default 120/min per client → `429 CLIENT_RATE_LIMITED`.
+- Every write emits an audit row attributed to your API client, and the objects you create can carry an **`external_id`** — your own id for that object, stored per client: send it on create and MCip maps it back to you (`external_id` fields and filters below).
+
+### 15.1 Workspaces
+
+| Operation | Route | Scope |
+|---|---|---|
+| List | `GET /admin/workspaces` | `workspaces:read` |
+| Get one | `GET /admin/workspaces/{id}` | `workspaces:read` |
+| Create | `POST /admin/workspaces` | `workspaces:write` |
+| Update | `PATCH /admin/workspaces/{id}` | `workspaces:write` |
+
+The list is ordered by name (`q` filters by substring, `external_id` resolves through your own id space, `page` selects the page). A workspace is `{id, name, description, is_enabled, owner_user_id, external_id, member_count, created_at}`. Another tenant's workspace answers `404 WORKSPACE_NOT_FOUND`, never `403`.
+
+**Create** takes `{name, description?, owner_user_id, external_id?}` — `owner_user_id` is required (a user of your organization: a workspace must have an owner, and the owner joins it) and answers `201`. Sample content is **not** seeded: a new workspace starts empty, like the UI's with samples declined. Send an `external_id` and a repeated create is a no-op returning the existing workspace with `200`.
+
+**Update** takes `{name?, description?, is_enabled?}`; omitted fields stay untouched. There is no workspace delete: to take one out of service, `PATCH` `{"is_enabled": false}` — the same transition as the UI's disable.
+
+### 15.2 Members and roles
+
+| Operation | Route | Scope |
+|---|---|---|
+| Roles of a workspace | `GET /admin/workspaces/{ws}/roles` | `workspaces:read` |
+| Members | `GET /admin/workspaces/{ws}/members` | `workspaces:read` |
+| Grant a role | `PUT /admin/workspaces/{ws}/members/{user_id}` | `members:write` |
+| Remove a member | `DELETE /admin/workspaces/{ws}/members/{user_id}` | `members:write` |
+
+Roles come as `{id, name, is_system_role, permissions, grantable}` — `grantable` says whether **your client** may grant it. Each API client has a **grant ceiling** (`max_grant_role`): granting a role above it answers `403 ROLE_ABOVE_CEILING`, and so does changing or removing a member whose current access already sits above it (a co-owner, or a `*`-permission role); the Owner role is never grantable (`409 OWNER_IMMUTABLE`).
+
+`PUT` upserts the user's **direct** membership with `{"role": "<name>"}` (role names resolve case-sensitively within the workspace, `404 ROLE_NOT_FOUND`) and answers `201` when created, `200` when changed. A membership derived from the organization or a group is refused with `409 MEMBERSHIP_MANAGED` — manage it where it was granted. `DELETE` removes the direct membership row (`204`; a user with no direct membership row answers `404 USER_NOT_FOUND`) and is refused for the owner (`409 OWNER_IMMUTABLE`).
+
+Pages of members: `{items, page, page_size, total}` with `{user_id, email, role, source, is_co_owner, joined_at}`, where `source` is `owner` (the workspace's owner), `direct` (granted in this workspace), or `org` / `group` (derived).
+
+### 15.3 Users
+
+| Operation | Route | Scope |
+|---|---|---|
+| List and search | `GET /admin/users` | `users:read` |
+| Get one | `GET /admin/users/{user_id}` | `users:read` |
+| Provision | `POST /admin/users` | `users:write` |
+| Update | `PATCH /admin/users/{user_id}` | `users:write` |
+| Remove from org | `DELETE /admin/users/{user_id}/membership` | `users:write` |
+
+Only users of **your** organization are visible; another tenant's user answers `404 USER_NOT_FOUND`. A user is `{id, email, display_name, is_active, org_role, external_id, created_at, last_login}` with `org_role` `owner` / `member` / `billing`; the list offers `q` (matches email or display name) and `external_id` filters plus `page` / `page_size`.
+
+**Provision** takes `{email, display_name?, external_id?}`: it creates the MCip account (unverified, random password, never returned), adds it to your organization and **emails a set-password link**, so the user activates it at their leisure — unless the organization has an SSO provider enabled, in which case no email is sent. An email on a domain the organization blocks answers `400 EMAIL_DOMAIN_NOT_ALLOWED`. A repeated `external_id`, or an email already in your org, answers `200` with the existing user (linked to your `external_id` if it wasn't yet) and changes nothing else — reusing that `external_id` with a different email is refused with `409 IDEMPOTENCY_CONFLICT`; an account that exists **outside** your org answers `409 USER_EXISTS_OUTSIDE_ORG` with no data — the API never takes over such an account. If the account was created but the email could not be sent, the call answers `503 EMAIL_DELIVERY_FAILED`: retry the same request, which re-links the user and re-sends the email.
+
+**Update** changes `display_name` (always allowed) and `is_active`. Deactivating revokes the user's sessions and API keys exactly like the Admin portal, and reactivating restores access; both are refused for organization owners (`409 OWNER_IMMUTABLE`), platform administrators (`403 USER_IS_PLATFORM_ADMIN`) and users who also belong to other organizations (`409 USER_IN_OTHER_ORGS`), and deactivating the last admin is refused (`409 LAST_ADMIN`) — promote another admin first.
+
+**Remove from org** removes the organization membership, **every** workspace seat the user holds in the org (direct, organization-derived and group-derived alike) and their membership of the org's user groups (`204`; refused for org owners and for the owner of any workspace in the org). The account itself is **never deleted** — this is the offboarding call.
+
+Example session — create a workspace for one of your users, then grant a colleague a role on it:
+
+```bash
+BASE=https://mcip.example.com/api/v1/ext
+KEY="X-MCip-Client-Key: $MCIP_CLIENT_KEY"
+
+# 1. Find the user who should own the new workspace
+curl -sS "$BASE/admin/users?q=ada" -H "$KEY"
+# → {"items":[{"id":"0b9d3c4e-…","email":"ada@example.com","org_role":"member",…}],…}
+
+# 2. Create the workspace; crm-ws-17 is your own id for it
+curl -sS -X POST "$BASE/admin/workspaces" -H "$KEY" -H "Content-Type: application/json" \
+  -d '{"name":"Support","description":"Customer support team","owner_user_id":"0b9d3c4e-…","external_id":"crm-ws-17"}'
+# → 201 {"id":12,"name":"Support","owner_user_id":"0b9d3c4e-…","external_id":"crm-ws-17","member_count":1,…}
+
+# 3. See which roles this client may grant
+curl -sS "$BASE/admin/workspaces/12/roles" -H "$KEY"
+# → [{"id":3,"name":"Editor","grantable":true,…},{"id":1,"name":"Owner","grantable":false,…}]
+
+# 4. Grant a user the Editor role
+curl -sS -X PUT "$BASE/admin/workspaces/12/members/<user-uuid>" -H "$KEY" \
+  -H "Content-Type: application/json" -d '{"role":"Editor"}'
+```
+
+The §6.1 table lists every extra `errorCode` these routes can return. The same client key, scopes and allowlist govern all of them.
+
+## 16. FAQ
 
 **Can we use one service key for all our users?** No. Every request must carry the key of the MCip user it acts for; MCip has no service accounts for chat.
 
