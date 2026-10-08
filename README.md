@@ -63,7 +63,7 @@ routes, not MCip's internal API:
 | Interactive spec (Swagger UI) | `https://<mcip-host>/api/v1/ext/docs` |
 | OpenAPI 3 document (JSON) | `https://<mcip-host>/api/v1/ext/openapi.json` |
 
-Live example (dev): <https://dev-mcintelligentplus.igsl-group.uk/api/v1/ext/docs>
+Live example (demo): <https://demo-mcintelligentplus.magiccreative.ai/api/v1/ext/docs>
 
 The spec documents these endpoints, all request/response and SSE event models, and the
 `{errorCode, message, request_id}` error body:
@@ -82,8 +82,10 @@ To try a call in Swagger UI, click **Authorize** and enter a user's chat-scoped 
 (`ss_pat_…`) under `ExtApiKey` and, if your API client requires one, its client key
 (`ss_cli_…`) under `ClientKey`. A full-access key gets `403 API_KEY_SCOPE`. Use
 `/api/v1/ext/docs`, not MCip's `/swagger`: `/swagger` is the internal API and not a
-contract for callers. The [integration guide](docs/integration-guide.md) covers the
-rules the spec can't express (retries and idempotency §8, key storage §11).
+contract for callers. The wiki's
+[Developer Guide](https://github.com/Magic-Creative/mcip-chat-demo/wiki/Developer-Guide)
+is the five-minute quickstart, and the [integration guide](docs/integration-guide.md)
+covers the rules the spec can't express (retries and idempotency §8, key storage §11).
 
 ### Knowledge base and Admin API
 
