@@ -559,11 +559,14 @@ async def test_theme_toggle_and_views_exist_in_the_page(session: DemoSession):
         assert f'id="{element_id}"' in html
 
 
-async def test_the_developer_guide_is_linked_for_signed_out_and_in_users(session: DemoSession):
+async def test_the_developer_guide_and_live_api_spec_are_linked_for_signed_out_and_in_users(
+    session: DemoSession,
+):
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     # the sign-in card (signed out), the connect card, the chat sidebar and
     # the developer info view (signed in)
     assert html.count("wiki/Developer-Guide") >= 4
+    assert html.count("https://demo-mcintelligentplus.magiccreative.ai/api/v1/ext/docs") >= 4
 
 
 async def test_the_key_never_reaches_the_logs(ready: DemoSession, fake, caplog):

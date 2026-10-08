@@ -282,7 +282,7 @@ async def test_developer_info_shows_configuration_with_prefixes_only(
         await context.close()
 
 
-async def test_the_developer_guide_is_linked_for_signed_out_and_in_users(
+async def test_the_developer_guide_and_live_api_spec_are_linked_for_signed_out_and_in_users(
     live_url: str, browser: Browser, store: Store
 ) -> None:
     store.create_user("alice", "password123")
@@ -292,6 +292,7 @@ async def test_the_developer_guide_is_linked_for_signed_out_and_in_users(
         await page.goto(live_url + "/")
         await expect(page.locator("#view-auth")).to_be_visible()
         await expect(page.locator('#view-auth a[href$="wiki/Developer-Guide"]')).to_be_visible()
+        await expect(page.locator('#view-auth a[href$="api/v1/ext/docs"]')).to_be_visible()
     finally:
         await context.close()
 
@@ -299,5 +300,6 @@ async def test_the_developer_guide_is_linked_for_signed_out_and_in_users(
     try:
         page = await open_chat(signed_in, live_url)
         await expect(page.locator('#sidebar-guide a[href$="wiki/Developer-Guide"]')).to_be_visible()
+        await expect(page.locator('#sidebar-guide a[href$="api/v1/ext/docs"]')).to_be_visible()
     finally:
         await signed_in.close()
