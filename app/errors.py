@@ -94,6 +94,28 @@ UI_STATE: dict[str, str] = {
     "DEMO_FORBIDDEN": "fatal",
     "DEMO_BAD_URL": "fatal",
     "DEMO_CLIENT_KEY_FORMAT": "fatal",
+    # OAuth connect (#1389): anything that ends a grant is a reconnect; an
+    # unfinished flow (state/code problems) is one too — starting over is the
+    # fix. Configuration mistakes are for the demo admin, not the user.
+    "OAUTH_TOKEN_EXPIRED": "reconnect",
+    "OAUTH_TOKEN_INVALID": "reconnect",
+    "OAUTH_GRANT_REVOKED": "reconnect",
+    "OAUTH_RECONNECT": "reconnect",
+    "OAUTH_DENIED": "reconnect",
+    "OAUTH_FAILED": "reconnect",
+    "OAUTH_STATE_MISSING": "reconnect",
+    "OAUTH_STATE_UNKNOWN": "reconnect",
+    "OAUTH_FLOW_EXPIRED": "reconnect",
+    "OAUTH_CODE_MISSING": "reconnect",
+    "OAUTH_ISS_MISSING": "reconnect",
+    "OAUTH_ISS_MISMATCH": "reconnect",
+    "OAUTH_EXCHANGE_FAILED": "reconnect",
+    "OAUTH_EXCHANGE_UNREACHABLE": "reconnect",
+    "OAUTH_ME_FAILED": "reconnect",
+    "OAUTH_DISABLED": "fatal",
+    "PAT_DISABLED": "fatal",
+    "OAUTH_NOT_CONFIGURED": "fatal",
+    "DEMO_OAUTH_CLIENT_ID_FORMAT": "fatal",
 }
 
 ADVICE: dict[str, str] = {
@@ -147,6 +169,31 @@ ADVICE: dict[str, str] = {
     "DEMO_FORBIDDEN": "Only a demo admin can change this.",
     "DEMO_BAD_URL": "Enter the MCip address, e.g. https://mcip.example.com",
     "DEMO_CLIENT_KEY_FORMAT": "An MCip client key starts with 'ss_cli_'.",
+    "OAUTH_TOKEN_EXPIRED": (
+        "The access token expired. Connect again (the demo refreshes it automatically)."
+    ),
+    "OAUTH_TOKEN_INVALID": "The OAuth token is no longer valid. Connect again.",
+    "OAUTH_GRANT_REVOKED": (
+        "The connection was revoked in MCip (by you, or an admin). Connect again."
+    ),
+    "OAUTH_RECONNECT": "The MCip connection expired. Connect again.",
+    "OAUTH_DENIED": "The connection request was denied in MCip. Try again if that was a mistake.",
+    "OAUTH_FAILED": "MCip refused the connection. Try again, or tell the demo admin.",
+    "OAUTH_STATE_MISSING": "MCip sent no state back — start the connection again.",
+    "OAUTH_STATE_UNKNOWN": "This connect attempt is unknown or already used. Start again.",
+    "OAUTH_FLOW_EXPIRED": "This connect attempt expired. Start again.",
+    "OAUTH_CODE_MISSING": "MCip sent no authorization code — start again.",
+    "OAUTH_ISS_MISSING": "MCip sent no issuer. Start again.",
+    "OAUTH_ISS_MISMATCH": "The response came from a different MCip address. Start again.",
+    "OAUTH_EXCHANGE_FAILED": "MCip refused the code exchange. Start again.",
+    "OAUTH_EXCHANGE_UNREACHABLE": "MCip was unreachable. Start again in a moment.",
+    "OAUTH_ME_FAILED": "MCip refused the new token. Start again.",
+    "OAUTH_DISABLED": "This demo connects with a pasted key right now.",
+    "PAT_DISABLED": "This demo uses Connect MCip (OAuth). Ask the demo admin to switch modes.",
+    "OAUTH_NOT_CONFIGURED": (
+        "A demo admin must set the OAuth client id (and keep the client key) in Settings."
+    ),
+    "DEMO_OAUTH_CLIENT_ID_FORMAT": "An MCip OAuth client id starts with 'mcip_cli_'.",
 }
 
 

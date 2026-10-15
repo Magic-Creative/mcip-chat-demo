@@ -38,7 +38,9 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE TABLE IF NOT EXISTS mcip_connections (
     user_id         INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-    key_ciphertext  BLOB NOT NULL,
+    -- PAT mode (auth_mode='pat'): the user's ss_pat_ key, Fernet-encrypted.
+    -- NULL in OAuth mode, where the credentials live in the columns below.
+    key_ciphertext  BLOB,
     key_prefix      TEXT NOT NULL,
     mcip_user_id    TEXT,
     display_name    TEXT,
@@ -51,7 +53,24 @@ CREATE TABLE IF NOT EXISTS mcip_connections (
     connected_at    TEXT NOT NULL,
     -- When workspaces_json was last fetched from GET /ext/me (connect or
     -- refresh); the UI re-refreshes once per boot when this is old.
-    workspaces_updated_at TEXT
+    workspaces_updated_at TEXT,
+    -- 'pat' (default, pre-#1389 rows) or 'oauth' (#1389).
+    auth_mode       TEXT NOT NULL DEFAULT 'pat',
+    -- OAuth mode (#1389): the ss_oat_/ss_ort_ tokens, Fernet-encrypted.
+    access_ciphertext  BLOB,
+    access_expires_at  TEXT,
+    refresh_ciphertext BLOB
+);
+
+-- One in-flight OAuth authorization (the state parameter). The code_verifier
+-- never leaves the server: state -> row, single use, short TTL (#1389).
+CREATE TABLE IF NOT EXISTS oauth_flows (
+    state              TEXT PRIMARY KEY,
+    user_id            INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    verifier_ciphertext BLOB NOT NULL,
+    redirect_uri       TEXT NOT NULL,
+    created_at         TEXT NOT NULL,
+    expires_at         TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS conversations (
@@ -95,9 +114,18 @@ CREATE TABLE IF NOT EXISTS app_settings (
 SETTING_BASE_URL = "mcip_base_url"
 SETTING_CLIENT_KEY = "mcip_client_key"  # Fernet token of the ``ss_cli_…`` key
 SETTING_CLIENT_KEY_PREFIX = "mcip_client_key_prefix"
+#: 'pat' (users paste a key) or 'oauth' (Connect MCip, #1389).
+SETTING_AUTH_MODE = "mcip_auth_mode"
+#: The registered OAuth client id (``mcip_cli_…``); the client secret is the
+#: client key above (#1389).
+SETTING_OAUTH_CLIENT_ID = "mcip_oauth_client_id"
 
-#: ``ss_pat_…`` keys anywhere in a string; used by :func:`redact` for logs.
-KEY_PATTERN = re.compile(r"ss_(pat|cli)_[A-Za-z0-9_\-]+")
+AUTH_MODE_PAT = "pat"
+AUTH_MODE_OAUTH = "oauth"
+
+#: ``ss_pat_…``/``ss_cli_…``/``ss_oat_…``/``ss_ort_…`` anywhere in a string;
+#: used by :func:`redact` for logs (#1389 adds the OAuth two).
+KEY_PATTERN = re.compile(r"ss_(pat|cli|oat|ort)_[A-Za-z0-9_\-]+")
 #: The prefix MCip shows for a key (``GET /me`` → ``key.prefix``).
 KEY_PREFIX_LENGTH = 16
 #: How long a turn's first-attempt conversation param stays on record. MCip
@@ -176,11 +204,56 @@ class Store:
                     "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"
                 )
             connection_columns = {
-                row["name"] for row in connection.execute("PRAGMA table_info(mcip_connections)")
+                row["name"]: row
+                for row in connection.execute("PRAGMA table_info(mcip_connections)")
             }
             if "workspaces_updated_at" not in connection_columns:
                 connection.execute(
                     "ALTER TABLE mcip_connections ADD COLUMN workspaces_updated_at TEXT"
+                )
+            if "auth_mode" not in connection_columns:
+                connection.execute(
+                    "ALTER TABLE mcip_connections ADD COLUMN auth_mode TEXT NOT NULL DEFAULT 'pat'"
+                )
+            # #1389: OAuth connections have no PAT, so key_ciphertext must be
+            # nullable. SQLite cannot relax NOT NULL in place; rebuild once.
+            key_column = connection_columns.get("key_ciphertext")
+            if key_column is not None and key_column["notnull"]:
+                connection.executescript(
+                    """
+                    ALTER TABLE mcip_connections RENAME TO mcip_connections_old;
+                    CREATE TABLE mcip_connections (
+                        user_id         INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                        key_ciphertext  BLOB,
+                        key_prefix      TEXT NOT NULL,
+                        mcip_user_id    TEXT,
+                        display_name    TEXT,
+                        email           TEXT,
+                        api_client_name TEXT,
+                        expires_at      TEXT,
+                        workspaces_json TEXT NOT NULL DEFAULT '[]',
+                        workspace_id    INTEGER,
+                        workspace_name  TEXT,
+                        connected_at    TEXT NOT NULL,
+                        workspaces_updated_at TEXT,
+                        auth_mode       TEXT NOT NULL DEFAULT 'pat',
+                        access_ciphertext  BLOB,
+                        access_expires_at  TEXT,
+                        refresh_ciphertext BLOB
+                    );
+                    INSERT INTO mcip_connections (
+                        user_id, key_ciphertext, key_prefix, mcip_user_id, display_name,
+                        email, api_client_name, expires_at, workspaces_json, workspace_id,
+                        workspace_name, connected_at, workspaces_updated_at, auth_mode
+                    )
+                    SELECT
+                        user_id, key_ciphertext, key_prefix, mcip_user_id, display_name,
+                        email, api_client_name, expires_at, workspaces_json, workspace_id,
+                        workspace_name, connected_at, workspaces_updated_at,
+                        COALESCE(auth_mode, 'pat')
+                    FROM mcip_connections_old;
+                    DROP TABLE mcip_connections_old;
+                    """
                 )
             conversation_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(conversations)")
@@ -268,8 +341,9 @@ class Store:
                 INSERT INTO mcip_connections (
                     user_id, key_ciphertext, key_prefix, mcip_user_id, display_name,
                     email, api_client_name, expires_at, workspaces_json,
-                    workspace_id, workspace_name, connected_at, workspaces_updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+                    workspace_id, workspace_name, connected_at, workspaces_updated_at,
+                    auth_mode, access_ciphertext, access_expires_at, refresh_ciphertext
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, 'pat', NULL, NULL, NULL)
                 ON CONFLICT(user_id) DO UPDATE SET
                     key_ciphertext = excluded.key_ciphertext,
                     key_prefix = excluded.key_prefix,
@@ -282,7 +356,11 @@ class Store:
                     workspace_id = NULL,
                     workspace_name = NULL,
                     connected_at = excluded.connected_at,
-                    workspaces_updated_at = excluded.workspaces_updated_at
+                    workspaces_updated_at = excluded.workspaces_updated_at,
+                    auth_mode = 'pat',
+                    access_ciphertext = NULL,
+                    access_expires_at = NULL,
+                    refresh_ciphertext = NULL
                 """,
                 (
                     user_id,
@@ -318,7 +396,7 @@ class Store:
             row = connection.execute(
                 "SELECT key_ciphertext FROM mcip_connections WHERE user_id = ?", (user_id,)
             ).fetchone()
-        if row is None:
+        if row is None or row["key_ciphertext"] is None:
             return None
         try:
             return self._fernet.decrypt(bytes(row["key_ciphertext"])).decode()
@@ -326,6 +404,166 @@ class Store:
             # Wrong DEMO_ENCRYPTION_KEY, or a corrupted row: treat as absent.
             self.delete_connection(user_id)
             return None
+
+    # -- OAuth connections (#1389) -------------------------------------------
+
+    def save_oauth_connection(
+        self,
+        user_id: int,
+        *,
+        access_token: str,
+        access_expires_at: str | None,
+        refresh_token: str,
+        prefix: str,
+        mcip_user_id: str | None,
+        display_name: str | None,
+        email: str | None,
+        api_client_name: str | None,
+        workspaces: list[dict[str, Any]],
+    ) -> None:
+        """Store the OAuth tokens encrypted; replace any previous connection.
+
+        ``key_prefix`` carries the access token's prefix (display only); the
+        PAT column is cleared so switching modes cannot leave a stale key
+        behind."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO mcip_connections (
+                    user_id, key_ciphertext, key_prefix, mcip_user_id, display_name,
+                    email, api_client_name, expires_at, workspaces_json,
+                    workspace_id, workspace_name, connected_at, workspaces_updated_at,
+                    auth_mode, access_ciphertext, access_expires_at, refresh_ciphertext
+                ) VALUES (?, NULL, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?, ?, 'oauth', ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    key_ciphertext = NULL,
+                    key_prefix = excluded.key_prefix,
+                    mcip_user_id = excluded.mcip_user_id,
+                    display_name = excluded.display_name,
+                    email = excluded.email,
+                    api_client_name = excluded.api_client_name,
+                    expires_at = NULL,
+                    workspaces_json = excluded.workspaces_json,
+                    workspace_id = NULL,
+                    workspace_name = NULL,
+                    connected_at = excluded.connected_at,
+                    workspaces_updated_at = excluded.workspaces_updated_at,
+                    auth_mode = 'oauth',
+                    access_ciphertext = excluded.access_ciphertext,
+                    access_expires_at = excluded.access_expires_at,
+                    refresh_ciphertext = excluded.refresh_ciphertext
+                """,
+                (
+                    user_id,
+                    prefix,
+                    mcip_user_id,
+                    display_name,
+                    email,
+                    api_client_name,
+                    _json_dumps(workspaces),
+                    now_iso(),
+                    now_iso(),
+                    self._fernet.encrypt(access_token.encode()),
+                    access_expires_at,
+                    self._fernet.encrypt(refresh_token.encode()),
+                ),
+            )
+
+    def get_oauth_tokens(self, user_id: int) -> dict[str, Any] | None:
+        """Decrypt the stored OAuth tokens for outgoing requests.
+
+        ``None`` when there is no OAuth connection; a corrupted row (wrong
+        encryption key) is dropped like a bad PAT."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT auth_mode, access_ciphertext, access_expires_at, refresh_ciphertext "
+                "FROM mcip_connections WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+        if row is None or row["auth_mode"] != AUTH_MODE_OAUTH:
+            return None
+        try:
+            return {
+                "access_token": self._fernet.decrypt(bytes(row["access_ciphertext"])).decode()
+                if row["access_ciphertext"] is not None
+                else None,
+                "access_expires_at": row["access_expires_at"],
+                "refresh_token": self._fernet.decrypt(bytes(row["refresh_ciphertext"])).decode()
+                if row["refresh_ciphertext"] is not None
+                else None,
+            }
+        except InvalidToken:
+            self.delete_connection(user_id)
+            return None
+
+    def update_oauth_access(
+        self, user_id: int, *, access_token: str, access_expires_at: str | None
+    ) -> bool:
+        """After a refresh: replace the access token, keep the refresh token.
+
+        (MCip does not rotate refresh tokens — Q2 — so there is never a new
+        one to store here.)"""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE mcip_connections SET access_ciphertext = ?, access_expires_at = ? "
+                "WHERE user_id = ? AND auth_mode = 'oauth'",
+                (self._fernet.encrypt(access_token.encode()), access_expires_at, user_id),
+            )
+            return cursor.rowcount > 0
+
+    def create_oauth_flow(
+        self,
+        user_id: int,
+        *,
+        state: str,
+        code_verifier: str,
+        redirect_uri: str,
+        expires_at: str,
+    ) -> None:
+        """Park one authorization (state -> verifier), server-side only.
+
+        Expired rows of other users are pruned here so the table stays small
+        without a background job."""
+        with self._connect() as connection:
+            connection.execute("DELETE FROM oauth_flows WHERE expires_at < ?", (now_iso(),))
+            connection.execute(
+                "INSERT INTO oauth_flows "
+                "(state, user_id, verifier_ciphertext, redirect_uri, created_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    state,
+                    user_id,
+                    self._fernet.encrypt(code_verifier.encode()),
+                    redirect_uri,
+                    now_iso(),
+                    expires_at,
+                ),
+            )
+
+    def consume_oauth_flow(self, state: str) -> dict[str, Any] | None:
+        """The flow for ``state``, once; deleting it in the same statement.
+
+        Returns ``{user_id, code_verifier, redirect_uri, expires_at}`` or
+        ``None`` when the state is unknown or already used (single-use)."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT user_id, verifier_ciphertext, redirect_uri, expires_at "
+                "FROM oauth_flows WHERE state = ?",
+                (state,),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute("DELETE FROM oauth_flows WHERE state = ?", (state,))
+        try:
+            verifier = self._fernet.decrypt(bytes(row["verifier_ciphertext"])).decode()
+        except InvalidToken:
+            return None
+        return {
+            "user_id": int(row["user_id"]),
+            "code_verifier": verifier,
+            "redirect_uri": row["redirect_uri"],
+            "expires_at": row["expires_at"],
+        }
 
     def set_workspace(
         self, user_id: int, workspace_id: int | None, workspace_name: str | None
@@ -469,9 +707,7 @@ class Store:
                 (now_iso(), conversation_id, user_id),
             )
 
-    def list_conversations(
-        self, user_id: int, workspace_id: int | None
-    ) -> list[dict[str, Any]]:
+    def list_conversations(self, user_id: int, workspace_id: int | None) -> list[dict[str, Any]]:
         """The conversations of one workspace, most recent first.
 
         ``None`` (no workspace chosen) matches nothing: conversations of a

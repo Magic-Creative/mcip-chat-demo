@@ -24,9 +24,12 @@ and answers 500 ``INTERNAL_ERROR``.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 from collections import deque
 from typing import Any
+from urllib.parse import parse_qsl
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -83,6 +86,29 @@ class FakeMcip:
         #: Seconds to sleep before each SSE event — a slow turn for the
         #: browser tests (the streaming state stays observable).
         self.pacing = 0.0
+        # -- OAuth 2.1 (#1389) -------------------------------------------------
+        self.oauth_client_id = "mcip_cli_demo_test"
+        self.oauth_client_secret = "ss_cli_demo_secret_0123456789"  # pragma: allowlist secret
+        #: ``expires_in`` the token endpoint reports.
+        self.access_ttl_s = 1800
+        #: code -> {redirect_uri, challenge, used, user_email}
+        self.oauth_codes: dict[str, dict[str, Any]] = {}
+        #: access token -> True while valid
+        self.oauth_access: dict[str, bool] = {}
+        self.oauth_refresh: dict[str, bool] = {}
+        self.token_requests: list[dict[str, Any]] = []
+        self.revoke_requests: list[dict[str, Any]] = []
+        #: Bearer values seen on ``GET /me`` that were ``ss_oat_``/``ss_ort_``.
+        self.oauth_me_bearers: list[str] = []
+        #: When set, the next OAuth ``/me`` call answers this once (scripted
+        #: 401s, e.g. OAUTH_TOKEN_EXPIRED for the retry path).
+        self.oauth_me_error_once: tuple[int, dict[str, Any]] | None = None
+        #: Treat every access token as expired (drives the refresh path).
+        self.access_always_expired = False
+        #: Refuse every refresh with ``invalid_grant`` (grant revoked).
+        self.refresh_invalid_grant = False
+        self.access_tokens_issued = 0
+        self._code_counter = 0
         self.app = self._build()
 
     # -- scripting -----------------------------------------------------------
@@ -126,6 +152,85 @@ class FakeMcip:
         self.valid_client_key = None
         self.client_key_in_grace = False
         self.pacing = 0.0
+        self.oauth_codes.clear()
+        self.oauth_access.clear()
+        self.oauth_refresh.clear()
+        self.token_requests.clear()
+        self.revoke_requests.clear()
+        self.oauth_me_bearers.clear()
+        self.oauth_me_error_once = None
+        self.access_always_expired = False
+        self.refresh_invalid_grant = False
+        self.access_tokens_issued = 0
+        self._code_counter = 0
+
+    # -- OAuth helpers (#1389) ----------------------------------------------
+
+    def seed_authorization_code(
+        self,
+        *,
+        redirect_uri: str,
+        challenge: str,
+        user_email: str = "alice@example.com",
+    ) -> str:
+        """Park one authorization code the demo's callback can redeem."""
+        code = f"code_test_{self._code_counter}"
+        self._code_counter += 1
+        self.oauth_codes[code] = {
+            "redirect_uri": redirect_uri,
+            "challenge": challenge,
+            "used": False,
+            "user_email": user_email,
+        }
+        return code
+
+    def issue_access_token(self, *, ttl_s: int | None = None) -> str:
+        """Mint a valid access token without a flow (refresh-path tests)."""
+        self.access_tokens_issued += 1
+        token = f"ss_oat_test_{self.access_tokens_issued}"
+        self.oauth_access[token] = True
+        if ttl_s is not None:
+            self.access_ttl_s = ttl_s
+        return token
+
+    def issue_refresh_token(self) -> str:
+        self.access_tokens_issued += 1
+        token = f"ss_ort_test_{self.access_tokens_issued}"
+        self.oauth_refresh[token] = True
+        return token
+
+    @staticmethod
+    async def _form_of(request: Request) -> dict[str, str]:
+        """A urlencoded body without the python-multipart dependency."""
+        raw = (await request.body()).decode()
+        return {k: v for k, v in parse_qsl(raw, keep_blank_values=True)}
+
+    def _basic_expected(self) -> str:
+        raw = f"{self.oauth_client_id}:{self.oauth_client_secret}".encode()
+        return "Basic " + base64.b64encode(raw).decode()
+
+    @staticmethod
+    def _pkce_matches(challenge: str, verifier: str) -> bool:
+        if not verifier:
+            return False
+        digest = hashlib.sha256(verifier.encode()).digest()
+        computed = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+        return computed == challenge
+
+    def _token_response(self, *, refresh_token: str | None) -> dict[str, Any]:
+        self.access_tokens_issued += 1
+        access = f"ss_oat_test_{self.access_tokens_issued}"
+        self.oauth_access[access] = True
+        body: dict[str, Any] = {
+            "access_token": access,
+            "token_type": "Bearer",
+            "expires_in": self.access_ttl_s,
+            "scope": "chat",
+        }
+        if refresh_token is not None:
+            self.oauth_refresh[refresh_token] = True
+            body["refresh_token"] = refresh_token
+        return body
 
     # -- the ASGI app --------------------------------------------------------
 
@@ -161,7 +266,27 @@ class FakeMcip:
 
         @app.get(f"{API_PREFIX}/me")
         async def me(request: Request) -> Response:
-            self.me_requests.append(request.headers.get("authorization", ""))
+            bearer = request.headers.get("authorization", "")
+            self.me_requests.append(bearer)
+            oauth_token = bearer.removeprefix("Bearer ").strip()
+            if oauth_token.startswith(("ss_oat_", "ss_ort_")):
+                self.oauth_me_bearers.append(oauth_token)
+                if self.oauth_me_error_once is not None:
+                    status, body = self.oauth_me_error_once
+                    self.oauth_me_error_once = None
+                    return JSONResponse(body, status_code=status)
+                if oauth_token.startswith("ss_ort_") or oauth_token not in self.oauth_access:
+                    return JSONResponse(error_body("OAUTH_TOKEN_INVALID"), status_code=401)
+                if self.access_always_expired:
+                    return JSONResponse(error_body("OAUTH_TOKEN_EXPIRED"), status_code=401)
+                payload = dict(self.me_payload)
+                payload["user"] = {"email": "alice@example.com", **(payload.get("user") or {})}
+                payload["key"] = {
+                    "prefix": oauth_token[:16],
+                    "expires_at": None,
+                    **(payload.get("key") or {}),
+                }
+                return JSONResponse(payload)
             client_key = request.headers.get("x-mcip-client-key")
             self.client_keys_seen.append(client_key)
             if self.required_client_key is not None:
@@ -173,6 +298,55 @@ class FakeMcip:
                 status, body = self.me_error
                 return JSONResponse(body, status_code=status)
             return JSONResponse(self.me_payload)
+
+        @app.post(f"{API_PREFIX}/oauth/token")
+        async def oauth_token(request: Request) -> Response:
+            form = await self._form_of(request)
+            authorization = request.headers.get("authorization", "")
+            self.token_requests.append({"form": form, "authorization": authorization})
+            if authorization != self._basic_expected():
+                return JSONResponse(
+                    {
+                        "error": "invalid_client",
+                        "error_description": "client authentication failed",
+                    },
+                    status_code=401,
+                )
+            grant_type = form.get("grant_type")
+            if grant_type == "authorization_code":
+                record = self.oauth_codes.get(form.get("code", ""))
+                if record is None or record["used"]:
+                    return JSONResponse({"error": "invalid_grant"}, status_code=400)
+                if form.get("redirect_uri") != record["redirect_uri"]:
+                    return JSONResponse({"error": "invalid_grant"}, status_code=400)
+                if not self._pkce_matches(record["challenge"], form.get("code_verifier", "")):
+                    return JSONResponse({"error": "invalid_grant"}, status_code=400)
+                record["used"] = True
+                self.access_tokens_issued += 1
+                refresh = f"ss_ort_test_{self.access_tokens_issued}"
+                return JSONResponse(self._token_response(refresh_token=refresh))
+            if grant_type == "refresh_token":
+                refresh = form.get("refresh_token", "")
+                if self.refresh_invalid_grant or refresh not in self.oauth_refresh:
+                    return JSONResponse({"error": "invalid_grant"}, status_code=400)
+                # No rotation (Q2): the same refresh token, a new access one.
+                return JSONResponse(self._token_response(refresh_token=None))
+            return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
+
+        @app.post(f"{API_PREFIX}/oauth/revoke")
+        async def oauth_revoke(request: Request) -> Response:
+            form = await self._form_of(request)
+            authorization = request.headers.get("authorization", "")
+            self.revoke_requests.append(
+                {"token": form.get("token", ""), "authorization": authorization}
+            )
+            if authorization != self._basic_expected():
+                return JSONResponse({"error": "invalid_client"}, status_code=401)
+            token = form.get("token", "")
+            self.oauth_access.pop(token, None)
+            self.oauth_refresh.pop(token, None)
+            # RFC 7009 §2.2: 200 for known, unknown and already-revoked alike.
+            return Response(status_code=200)
 
         @app.post(f"{API_PREFIX}/chat")
         async def chat(request: Request) -> Response:

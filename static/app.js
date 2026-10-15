@@ -15,6 +15,7 @@ export const state = {
   allowRegister: false,
   configured: false, // an MCip base URL is set (admin Settings)
   settingsOpen: false,
+  authMode: 'pat', // 'pat' (paste a key) or 'oauth' (Connect MCip, #1389)
 };
 
 export class ApiError extends Error {
@@ -111,6 +112,7 @@ function route() {
   $('host-chip').textContent = state.mcipHost;
   $('empty-host').textContent = state.mcipHost || 'MCip';
 
+  renderConnectMode();
   if (!state.user) return show('view-auth');
   const isAdmin = Boolean(state.user.is_admin);
   // Admins land on Settings until the MCip address is set (first run).
@@ -120,6 +122,21 @@ function route() {
   if (!state.connection.workspace) return showWorkspacePicker();
   show('view-chat');
   chat.activate();
+}
+
+/**
+ * Which connect flow the card shows (#1389): the pasted key (PAT mode) or
+ * Connect MCip (OAuth mode). Both keep the same bottom notes.
+ */
+function renderConnectMode() {
+  const oauth = state.authMode === 'oauth';
+  $('connect-pat').hidden = oauth;
+  $('connect-oauth').hidden = !oauth;
+  $('connect-oauth-note').hidden = !oauth;
+  $('connect-note-pat').hidden = oauth;
+  $('disconnect').textContent = oauth
+    ? 'Disconnect MCip connection'
+    : 'Disconnect MCip key';
 }
 
 /* -- errors ---------------------------------------------------------------- */
@@ -274,6 +291,13 @@ function describeSettings(view) {
   $('settings-key-hint').textContent = view.client_key_prefix
     ? `Stored: ${view.client_key_prefix}… (saved by ${view.client_key_updated_by || 'an admin'} on ${formatWhen(view.client_key_updated_at)}). Leave blank to keep it.`
     : 'No client key stored. Needed when the MCip API client requires one.';
+  $('settings-auth-hint').textContent =
+    view.auth_mode === 'oauth'
+      ? 'Users connect with Connect MCip (OAuth 2.1); the pasted-key form is disabled.'
+      : 'Users paste an MCip key. Connect MCip (OAuth) arrives with the stored OAuth client ID.';
+  $('settings-oauth-hint').textContent = view.oauth_client_id
+    ? `Client ID: ${view.oauth_client_id}. Register this redirect URI on the client: ${view.oauth_redirect_uri}`
+    : `Register a client in MCip with the redirect URI ${view.oauth_redirect_uri}, then paste its mcip_cli_… ID here.`;
 }
 
 function formatWhen(iso) {
@@ -289,6 +313,8 @@ async function openSettings() {
   try {
     const { settings } = await api('/api/admin/settings');
     $('settings-url').value = settings.mcip_base_url || '';
+    $('settings-auth-mode').value = settings.auth_mode || 'pat';
+    $('settings-oauth-client-id').value = settings.oauth_client_id || '';
     $('settings-client-key').value = '';
     $('settings-clear-key').checked = false;
     $('settings-clear-key').disabled = !settings.client_key_prefix;
@@ -307,17 +333,25 @@ async function saveSettings() {
   const url = $('settings-url').value.trim();
   const key = $('settings-client-key').value.trim();
   const clearKey = $('settings-clear-key').checked;
+  const authMode = $('settings-auth-mode').value;
+  const oauthClientId = $('settings-oauth-client-id').value.trim();
   const body = {};
   if (url) body.mcip_base_url = url;
   if (key) body.client_key = key;
   if (clearKey) body.clear_client_key = true;
+  if (authMode !== state.authMode) body.auth_mode = authMode;
+  if (oauthClientId) body.oauth_client_id = oauthClientId;
   if (Object.keys(body).length === 0) {
-    fillError(errorBox, new Error('Enter the MCip address first.'));
+    fillError(errorBox, new Error('Nothing to save.'));
     return;
   }
+  const disconnecting = Boolean(
+    body.mcip_base_url || body.client_key || body.clear_client_key || body.oauth_client_id,
+  );
   if (
+    disconnecting &&
     !window.confirm(
-      'Saving a new MCip address or client key disconnects every user, including you. Continue?',
+      'Saving a new MCip address, client ID or client key disconnects every user, including you. Continue?',
     )
   ) {
     return;
@@ -327,6 +361,7 @@ async function saveSettings() {
   try {
     const result = await api('/api/admin/settings', { method: 'PUT', body, csrf: true });
     $('settings-client-key').value = ''; // never keep the key in the DOM
+    $('settings-oauth-client-id').value = result.settings.oauth_client_id || '';
     $('settings-clear-key').checked = false;
     $('settings-clear-key').disabled = !result.settings.client_key_prefix;
     describeSettings(result.settings);
@@ -479,11 +514,21 @@ function init() {
   });
 
   $('disconnect').addEventListener('click', async () => {
-    if (!window.confirm('Forget the stored MCip key on this demo server?')) return;
+    const confirmText =
+      state.authMode === 'oauth'
+        ? 'Disconnect this MCip connection (revokes it in MCip)?'
+        : 'Forget the stored MCip key on this demo server?';
+    if (!window.confirm(confirmText)) return;
     try {
-      await api('/api/connection', { method: 'DELETE', csrf: true });
+      const result = await api('/api/connection', { method: 'DELETE', csrf: true });
       state.connection = null;
       hideBanner();
+      if (result && result.revoked === false) {
+        showBanner(
+          'Disconnected here, but MCip could not be reached to revoke the connection. It stays valid there until it expires — tell the demo admin if this persists.',
+          null,
+        );
+      }
       route();
     } catch (error) {
       showBanner(error.fullText || 'Could not disconnect.', null);
@@ -513,6 +558,7 @@ function applySession(session) {
   state.mcipHost = session.mcip_host || '';
   state.configured = Boolean(session.configured);
   state.allowRegister = session.allow_register;
+  state.authMode = session.auth_mode === 'oauth' ? 'oauth' : 'pat';
   $('connect-host').textContent = state.mcipHost || 'MCip';
   $('connect-link').href = state.mcipHost
     ? `https://${state.mcipHost}/user-settings/api-key`
@@ -524,6 +570,7 @@ async function boot() {
   try {
     applySession(await api('/api/session'));
     showRegisterForm(false);
+    handleOAuthCallback();
     route();
   } catch {
     showBanner('Cannot reach the demo server. Reload the page to try again.', {
@@ -531,6 +578,32 @@ async function boot() {
       onClick: () => window.location.reload(),
     });
   }
+}
+
+/**
+ * The OAuth hand-off outcome (#1389): MCip sent the browser back with
+ * ``?connected=oauth`` (success) or ``?oauth_error=…`` (failure). Show it
+ * once, then scrub the query so a reload does not re-show it.
+ */
+function handleOAuthCallback() {
+  const params = new URLSearchParams(window.location.search);
+  const connected = params.get('connected');
+  const oauthError = params.get('oauth_error');
+  if (!connected && !oauthError) return;
+  if (connected === 'oauth') {
+    showBanner('Connected to MCip. Pick a workspace to start chatting.', null);
+  } else if (oauthError) {
+    showBanner(String(oauthError), null);
+  }
+  params.delete('connected');
+  params.delete('oauth_error');
+  params.delete('oauth_error_code');
+  const query = params.toString();
+  window.history.replaceState(
+    {},
+    '',
+    window.location.pathname + (query ? `?${query}` : ''),
+  );
 }
 
 init();
