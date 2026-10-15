@@ -16,7 +16,7 @@ Your user ──► Your GUI ──► Your backend ── looks up this user's 
 
 ## 2. Onboarding
 
-1. **An admin registers your system as an API client.** A system admin does this at **Admin → API clients** (`/admin/api-clients`), or an organization owner does it at **Organization settings → API clients** (`/org/<slug>/settings/api-clients`). Every API client belongs to an organization — keys of the client can only reach that organization's workspaces — and the admin can pin IP ranges and set its limits. Ask the admin for the client's **name** and its **organization**; your users will pick the client.
+1. **An admin registers your system as an API client.** An organization owner does this at **Organization settings → API clients** (`/org/<slug>/settings/api-clients`); system admins use the same org page (the old `/admin/api-clients` page was removed). Every API client belongs to an organization — keys of the client can only reach that organization's workspaces — and the admin can pin IP ranges and set its limits. Ask the admin for the client's **name** and its **organization**; your users will pick the client.
 2. **Each user creates a key** at `/user-settings/api-key` → **Create API key**:
    - **Use for:** `External system: <your client name>`. This makes a *chat* key: it only works on `/api/v1/ext/*`, and only for your client.
    - **Expires in days (required):** default 90, maximum 365 (or less if the deployment sets `PAT_MAX_EXPIRY_DAYS`).
@@ -355,7 +355,118 @@ curl -N https://mcip.example.com/api/v1/ext/chat \
   -d '{"workspace_id":12,"message":"Hello","conversation_id":null,"stream":true,"client_request_id":"demo-1"}'
 ```
 
-## 14. FAQ
+## 14. Connect with OAuth (OAuth 2.1)
+
+> **Availability:** only when the MCip deployment turns on `EXT_OAUTH_ENABLED` (off by
+> default). Applies to the chat and knowledge-base routes; the `/ext/admin` routes stay
+> client-key only. This section mirrors the MCip wiki's *Connect with OAuth*; the errors
+> and bodies are those of `/api/v1/oauth/*` (`app/routes/oauth_routes.py` on the MCip side).
+
+OAuth is the alternative to pasting a key (§2): the user authorizes your client once in
+the browser, and your backend then calls `/ext` with a short-lived access token. It is
+authorization code + PKCE (`S256`); your client secret is the **client key** you already
+have (§3) — `client_id` and the registered redirect URIs come from the MCip admin.
+
+### 14.1 Authorize (browser)
+
+Generate a `code_verifier` (43–128 chars) with its `S256` challenge, keep both server-side,
+and send the user's browser to:
+
+```
+GET https://<mcip-host>/api/v1/oauth/authorize
+  ?response_type=code
+  &client_id=mcip_cli_<...>
+  &redirect_uri=https%3A%2F%2Fyour-app.example%2Foauth%2Fcallback
+  &scope=chat
+  &state=<opaque, 8+ chars>
+  &code_challenge=<base64url(sha256(code_verifier))>
+  &code_challenge_method=S256
+```
+
+The `redirect_uri` must match a registered URI **exactly**; an unknown client or a
+mismatched URI is an error page on MCip, never a redirect to you. MCip answers `303` to
+its consent page; on approval the browser returns to your `redirect_uri` with
+`?code=…&state=…&iss=…`. Verify `state` matches what you sent and `iss` is the MCip
+issuer you recorded (the metadata document `/.well-known/oauth-authorization-server`
+publishes it). A denial returns `error=access_denied` with `state` and `iss` instead.
+
+### 14.2 Exchange the code (server-to-server)
+
+```
+POST https://<mcip-host>/api/v1/oauth/token
+Authorization: Basic base64(urlencode(client_id) ":" urlencode(client_key))
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=authorization_code
+&code=<the code>
+&redirect_uri=<the same redirect_uri>
+&code_verifier=<the verifier from 14.1>
+```
+
+```json
+{
+  "access_token": "ss_oat_<...>",
+  "token_type": "Bearer",
+  "expires_in": 1800,
+  "scope": "chat",
+  "refresh_token": "ss_ort_<...>"
+}
+```
+
+Codes are single-use (a reused code revokes the tokens of its first redemption) and live
+60 seconds. `expires_in` is the client's access-token TTL (default 30 min, 5–60 per
+client).
+
+### 14.3 Call `/ext` with the access token
+
+Exactly the endpoints of §4–§5, with the OAuth token instead of a key:
+
+```
+Authorization: Bearer ss_oat_<...>
+```
+
+Do **not** send `X-MCip-Client-Key` on this path (the client authenticated at the token
+endpoint; a second client credential is `400 AMBIGUOUS_PRINCIPAL`). The token's scopes
+are re-checked against the client's *current* settings on every request.
+
+### 14.4 Refresh (no rotation)
+
+```
+POST https://<mcip-host>/api/v1/oauth/token
+Authorization: Basic base64(client_id ":" client_key)
+
+grant_type=refresh_token&refresh_token=<the ss_ort_ token>
+```
+
+The answer carries a **new `access_token` and the same `refresh_token`** — MCip does not
+rotate refresh tokens. Refresh tokens expire after 30 days idle or 365 days absolute, and
+the grant can be revoked by the user (Connected apps), an org admin, or deactivation. When
+it stops working you get `invalid_grant`: start a new authorization.
+
+### 14.5 Revoke
+
+```
+POST https://<mcip-host>/api/v1/oauth/revoke
+Authorization: Basic base64(client_id ":" client_key)
+
+token=<ss_oat_ or ss_ort_ token>
+```
+
+Always `200` for a well-formed request (RFC 7009 §2.2). Revoking a refresh token revokes
+the whole grant; an access token revokes only itself.
+
+### 14.6 Errors
+
+`/oauth/*` errors use the RFC 6749 §5.2 codes: `invalid_request`, `invalid_client`
+(after 10 failures per IP in 5 min: `429`), `invalid_grant` (code reused/expired, PKCE
+mismatch, refresh dead), `invalid_scope`, `unauthorized_client`, `unsupported_grant_type`,
+and `temporarily_unavailable` when MCip's Redis is down (the whole `/oauth/*` surface
+fails closed). `/ext` calls with an `ss_oat_` token answer the §6 error codes with one
+addition: `OAUTH_TOKEN_INVALID`, `OAUTH_TOKEN_EXPIRED` (refresh) and `OAUTH_GRANT_REVOKED`
+(re-authorize), each `401` with `WWW-Authenticate: Bearer error="invalid_token"`.
+
+## 15. FAQ
+
 
 **Can we use one service key for all our users?** No. Every request must carry the key of the MCip user it acts for; MCip has no service accounts for chat.
 
