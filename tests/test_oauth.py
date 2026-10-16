@@ -198,6 +198,81 @@ async def test_callback_requires_the_iss_parameter(session: DemoSession, store, 
     assert len(fake.token_requests) == exchanges_before
 
 
+async def test_callback_matches_the_recorded_metadata_issuer_exactly(
+    session: DemoSession, store, fake: FakeMcip
+):
+    """RFC 9207 §2.4: exact string match, not an origin compare.
+
+    The issuer recorded at /start is the AS metadata's, so an issuer *path*
+    that differs from the base URL is legitimate when the metadata says so —
+    and the callback must then also reject the bare origin.
+    """
+    fake.oauth_issuer = "http://mcip.test/tenant"
+    await _enable_oauth(session, store, fake)
+    store.create_user("alice", "password123")
+    assert (await session.login("alice")).status_code == 200
+
+    start = await session.client.get("/api/oauth/start")
+    query = parse_qs(urlsplit(start.headers["location"]).query)
+    redirect_uri = query["redirect_uri"][0]
+    code = fake.seed_authorization_code(
+        redirect_uri=redirect_uri, challenge=query["code_challenge"][0]
+    )
+
+    wrong = await session.client.get(
+        "/api/oauth/callback",
+        params={"code": code, "state": query["state"][0], "iss": "http://mcip.test"},
+    )
+    assert "oauth_error_code=OAUTH_ISS_MISMATCH" in wrong.headers["location"], (
+        "the bare origin differs from the recorded issuer path"
+    )
+
+    # The recorded issuer itself succeeds.
+    start2 = await session.client.get("/api/oauth/start")
+    query2 = parse_qs(urlsplit(start2.headers["location"]).query)
+    code2 = fake.seed_authorization_code(
+        redirect_uri=query2["redirect_uri"][0], challenge=query2["code_challenge"][0]
+    )
+    ok = await session.client.get(
+        "/api/oauth/callback",
+        params={
+            "code": code2,
+            "state": query2["state"][0],
+            "iss": "http://mcip.test/tenant",
+        },
+    )
+    assert ok.headers["location"] == "/?connected=oauth"
+
+
+async def test_start_fails_closed_when_the_metadata_is_missing(
+    session: DemoSession, store, fake: FakeMcip
+):
+    fake.oauth_issuer = None
+    await _enable_oauth(session, store, fake)
+    store.create_user("alice", "password123")
+    assert (await session.login("alice")).status_code == 200
+
+    response = await session.client.get("/api/oauth/start")
+
+    assert response.status_code == 503
+    assert response.json()["errorCode"] == "OAUTH_METADATA_UNREACHABLE"
+
+
+async def test_start_requires_demo_public_url_in_oauth_mode(
+    session: DemoSession, store, fake: FakeMcip, monkeypatch
+):
+    """#1439 review item 2: no Host-derived redirect URI in oauth mode."""
+    await _enable_oauth(session, store, fake)
+    store.create_user("alice", "password123")
+    assert (await session.login("alice")).status_code == 200
+    monkeypatch.delenv("DEMO_PUBLIC_URL", raising=False)
+
+    response = await session.client.get("/api/oauth/start")
+
+    assert response.status_code == 503
+    assert response.json()["errorCode"] == "OAUTH_PUBLIC_URL_UNSET"
+
+
 async def test_callback_denial_is_reported(session: DemoSession, store, fake: FakeMcip):
     await _connect_oauth(session, store, fake)
     start = await session.client.get("/api/oauth/start")
@@ -321,7 +396,8 @@ async def test_session_and_settings_expose_the_mode(session: DemoSession, store,
     settings = (await session.client.get("/api/admin/settings")).json()["settings"]
     assert settings["auth_mode"] == AUTH_MODE_OAUTH
     assert settings["oauth_client_id"] == fake.oauth_client_id
-    assert settings["oauth_redirect_uri"].endswith("/api/oauth/callback")
+    assert settings["oauth_redirect_uri"] == "http://demo.test/api/oauth/callback"
+    assert settings["public_url_configured"] is True
 
     # Back to PAT: the paste path works again without a redeploy.
     assert (

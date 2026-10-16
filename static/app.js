@@ -295,9 +295,15 @@ function describeSettings(view) {
     view.auth_mode === 'oauth'
       ? 'Users connect with Connect MCip (OAuth 2.1); the pasted-key form is disabled.'
       : 'Users paste an MCip key. Connect MCip (OAuth) arrives with the stored OAuth client ID.';
-  $('settings-oauth-hint').textContent = view.oauth_client_id
-    ? `Client ID: ${view.oauth_client_id}. Register this redirect URI on the client: ${view.oauth_redirect_uri}`
-    : `Register a client in MCip with the redirect URI ${view.oauth_redirect_uri}, then paste its mcip_cli_… ID here.`;
+  const publicUrlWarning =
+    view.auth_mode === 'oauth' && view.public_url_configured === false
+      ? ' DEMO_PUBLIC_URL is not set: connecting is refused until an admin sets it.'
+      : '';
+  $('settings-oauth-hint').textContent =
+    (view.oauth_client_id
+      ? `Client ID: ${view.oauth_client_id}. Register this redirect URI on the client: ${view.oauth_redirect_uri}`
+      : `Register a client in MCip with the redirect URI ${view.oauth_redirect_uri}, then paste its mcip_cli_… ID here.`) +
+    publicUrlWarning;
 }
 
 function formatWhen(iso) {

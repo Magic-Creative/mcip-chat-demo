@@ -58,6 +58,7 @@ from app.mcip import (
     OAuthProtocolError,
     build_authorize_url,
     code_challenge_for,
+    fetch_issuer,
     generate_code_verifier,
     generate_state,
     oauth_revoke_token,
@@ -401,14 +402,19 @@ def create_app(
     async def get_oauth_client_id() -> str | None:
         return await asyncio.to_thread(store.get_setting, SETTING_OAUTH_CLIENT_ID)
 
+    def configured_public_url() -> str | None:
+        return os.environ.get("DEMO_PUBLIC_URL", "").strip().rstrip("/") or None
+
     def public_redirect_uri(request: Request) -> str:
         """The callback URI MCip must have registered, exactly (#1389).
 
         ``DEMO_PUBLIC_URL`` overrides the request-derived origin for exactness
-        behind proxies; the admin page shows the value to register.
+        behind proxies; the admin page shows the value to register. In OAuth
+        mode the start route requires it (#1439 review item 2): a
+        Host-header-derived redirect URI fails MCip's exact-match check, so
+        the demo would rather refuse than be at the mercy of the proxy.
         """
-        configured = os.environ.get("DEMO_PUBLIC_URL", "").strip().rstrip("/")
-        base = configured or str(request.base_url).rstrip("/")
+        base = configured_public_url() or str(request.base_url).rstrip("/")
         return f"{base}/api/oauth/callback"
 
     async def refresh_oauth_tokens(user_id: int) -> bool:
@@ -438,6 +444,10 @@ def create_app(
         except (OAuthProtocolError, httpx.HTTPError) as exc:
             logger.warning("oauth refresh failed for user=%s: %s", user_id, redact(str(exc))[:200])
             if isinstance(exc, OAuthProtocolError) and exc.error in {
+                # The reconnect UX relies on `invalid_grant`/`invalid_client`.
+                # `unauthorized_client` is kept as a defensive member only —
+                # phase-1 MCip never returns it (a non-enabled grant type
+                # answers `unsupported_grant_type`, #1437 review).
                 "invalid_grant",
                 "invalid_client",
                 "unauthorized_client",
@@ -576,6 +586,7 @@ def create_app(
             "auth_mode": await get_auth_mode(),
             "oauth_client_id": await get_oauth_client_id(),
             "oauth_redirect_uri": public_redirect_uri(request) if request is not None else None,
+            "public_url_configured": configured_public_url() is not None,
         }
 
     # -- error handling -----------------------------------------------------
@@ -859,7 +870,22 @@ def create_app(
             raise api_error(
                 503, "DEMO_NOT_CONFIGURED", "The demo admin has not set the MCip address yet."
             )
+        if not configured_public_url():
+            raise api_error(
+                503,
+                "OAUTH_PUBLIC_URL_UNSET",
+                "The demo admin must set DEMO_PUBLIC_URL in oauth mode.",
+            )
         enforce_limit(f"connect:{user_id}", settings.login_rate_per_minute, "Too many attempts.")
+        try:
+            issuer = await fetch_issuer(base_url, transport=mcip_transport)
+        except (OAuthProtocolError, httpx.HTTPError) as exc:
+            logger.warning("oauth start: metadata unreachable: %s", redact(str(exc))[:200])
+            raise api_error(
+                503,
+                "OAUTH_METADATA_UNREACHABLE",
+                "MCip's OAuth metadata is unreachable; check the MCip address.",
+            ) from exc
         state = generate_state()
         verifier = generate_code_verifier()
         redirect_uri = public_redirect_uri(request)
@@ -869,6 +895,7 @@ def create_app(
             state=state,
             code_verifier=verifier,
             redirect_uri=redirect_uri,
+            issuer=issuer,
             expires_at=_iso_in(OAUTH_FLOW_TTL_S),
         )
         target = build_authorize_url(
@@ -913,11 +940,12 @@ def create_app(
             return fail("OAUTH_CODE_MISSING", "MCip sent no authorization code; start again.")
         iss = (params.get("iss") or "").strip()
         base_url = await current_base_url()
-        # S3/RFC 9207: MCip always returns `iss`; a missing or different one is
-        # a mix-up signal. Fail closed — start over rather than trust it.
+        # S3/RFC 9207 §2.4: exact string match against the issuer the flow
+        # started with (the AS metadata we fetched at /start) — not an origin
+        # compare, which would accept a different issuer path (#1439 review).
         if not iss:
             return fail("OAUTH_ISS_MISSING", "MCip sent no issuer; start again.")
-        if _origin(iss) != _origin(base_url):
+        if iss != (flow.get("issuer") or ""):
             return fail("OAUTH_ISS_MISMATCH", "The response came from a different MCip issuer.")
         client_id = await get_oauth_client_id()
         client_key = await asyncio.to_thread(store.get_client_key)
@@ -975,8 +1003,12 @@ def create_app(
             api_client_name=client.get("name"),
             workspaces=list(me.get("workspaces") or []),
         )
+        # PII: never the full address in logs (#1439 review item 3).
         logger.info(
-            "oauth connected user=%s as %s (client_id=%s)", user_id, user.get("email"), client_id
+            "oauth connected user=%s as %s (client_id=%s)",
+            user_id,
+            _mask_email(user.get("email")),
+            client_id,
         )
         return RedirectResponse("/?connected=oauth", status_code=303)
 
@@ -1500,9 +1532,12 @@ def _iso_expired(value: str | None) -> bool:
     return moment <= datetime.now(UTC)
 
 
-def _origin(url: str) -> str:
-    parts = urlsplit(url)
-    return f"{parts.scheme}://{parts.netloc}"
+def _mask_email(email: object) -> str:
+    """`alice@example.com` -> `a***@example.com` for logs (#1439 review)."""
+    if not isinstance(email, str) or "@" not in email:
+        return "unknown"
+    local, _, domain = email.partition("@")
+    return f"{local[:1]}***@{domain}"
 
 
 def _sse(event: dict[str, Any]) -> str:

@@ -87,6 +87,8 @@ class FakeMcip:
         #: browser tests (the streaming state stays observable).
         self.pacing = 0.0
         # -- OAuth 2.1 (#1389) -------------------------------------------------
+        #: The AS metadata's issuer; None = the metadata route is absent.
+        self.oauth_issuer: str | None = "http://mcip.test"
         self.oauth_client_id = "mcip_cli_demo_test"
         self.oauth_client_secret = "ss_cli_demo_secret_0123456789"  # pragma: allowlist secret
         #: ``expires_in`` the token endpoint reports.
@@ -152,6 +154,7 @@ class FakeMcip:
         self.valid_client_key = None
         self.client_key_in_grace = False
         self.pacing = 0.0
+        self.oauth_issuer = "http://mcip.test"
         self.oauth_codes.clear()
         self.oauth_access.clear()
         self.oauth_refresh.clear()
@@ -298,6 +301,19 @@ class FakeMcip:
                 status, body = self.me_error
                 return JSONResponse(body, status_code=status)
             return JSONResponse(self.me_payload)
+
+        @app.get("/.well-known/oauth-authorization-server")
+        async def oauth_metadata() -> Response:
+            if self.oauth_issuer is None:
+                return JSONResponse({"detail": "Not Found"}, status_code=404)
+            return JSONResponse(
+                {
+                    "issuer": self.oauth_issuer,
+                    "authorization_endpoint": f"{API_PREFIX}/oauth/authorize",
+                    "token_endpoint": f"{API_PREFIX}/oauth/token",
+                    "code_challenge_methods_supported": ["S256"],
+                }
+            )
 
         @app.post(f"{API_PREFIX}/oauth/token")
         async def oauth_token(request: Request) -> Response:

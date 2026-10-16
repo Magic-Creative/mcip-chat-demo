@@ -103,6 +103,8 @@ UI_STATE: dict[str, str] = {
     "OAUTH_RECONNECT": "reconnect",
     "OAUTH_DENIED": "reconnect",
     "OAUTH_FAILED": "reconnect",
+    "OAUTH_METADATA_UNREACHABLE": "fatal",
+    "OAUTH_PUBLIC_URL_UNSET": "fatal",
     "OAUTH_STATE_MISSING": "reconnect",
     "OAUTH_STATE_UNKNOWN": "reconnect",
     "OAUTH_FLOW_EXPIRED": "reconnect",
@@ -179,6 +181,12 @@ ADVICE: dict[str, str] = {
     "OAUTH_RECONNECT": "The MCip connection expired. Connect again.",
     "OAUTH_DENIED": "The connection request was denied in MCip. Try again if that was a mistake.",
     "OAUTH_FAILED": "MCip refused the connection. Try again, or tell the demo admin.",
+    "OAUTH_METADATA_UNREACHABLE": (
+        "MCip's OAuth metadata is unreachable — check the MCip address in Settings."
+    ),
+    "OAUTH_PUBLIC_URL_UNSET": (
+        "Set DEMO_PUBLIC_URL so the redirect URI is exact instead of Host-derived."
+    ),
     "OAUTH_STATE_MISSING": "MCip sent no state back — start the connection again.",
     "OAUTH_STATE_UNKNOWN": "This connect attempt is unknown or already used. Start again.",
     "OAUTH_FLOW_EXPIRED": "This connect attempt expired. Start again.",

@@ -64,11 +64,14 @@ CREATE TABLE IF NOT EXISTS mcip_connections (
 
 -- One in-flight OAuth authorization (the state parameter). The code_verifier
 -- never leaves the server: state -> row, single use, short TTL (#1389).
+-- `issuer` is the AS metadata's issuer recorded at start; the callback
+-- compares the response's `iss` against it exactly (RFC 9207).
 CREATE TABLE IF NOT EXISTS oauth_flows (
     state              TEXT PRIMARY KEY,
     user_id            INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     verifier_ciphertext BLOB NOT NULL,
     redirect_uri       TEXT NOT NULL,
+    issuer             TEXT,
     created_at         TEXT NOT NULL,
     expires_at         TEXT NOT NULL
 );
@@ -211,6 +214,11 @@ class Store:
                 connection.execute(
                     "ALTER TABLE mcip_connections ADD COLUMN workspaces_updated_at TEXT"
                 )
+            flow_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(oauth_flows)")
+            }
+            if flow_columns and "issuer" not in flow_columns:
+                connection.execute("ALTER TABLE oauth_flows ADD COLUMN issuer TEXT")
             if "auth_mode" not in connection_columns:
                 connection.execute(
                     "ALTER TABLE mcip_connections ADD COLUMN auth_mode TEXT NOT NULL DEFAULT 'pat'"
@@ -518,6 +526,7 @@ class Store:
         state: str,
         code_verifier: str,
         redirect_uri: str,
+        issuer: str,
         expires_at: str,
     ) -> None:
         """Park one authorization (state -> verifier), server-side only.
@@ -528,13 +537,14 @@ class Store:
             connection.execute("DELETE FROM oauth_flows WHERE expires_at < ?", (now_iso(),))
             connection.execute(
                 "INSERT INTO oauth_flows "
-                "(state, user_id, verifier_ciphertext, redirect_uri, created_at, expires_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(state, user_id, verifier_ciphertext, redirect_uri, issuer, "
+                "created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     state,
                     user_id,
                     self._fernet.encrypt(code_verifier.encode()),
                     redirect_uri,
+                    issuer,
                     now_iso(),
                     expires_at,
                 ),
@@ -543,11 +553,11 @@ class Store:
     def consume_oauth_flow(self, state: str) -> dict[str, Any] | None:
         """The flow for ``state``, once; deleting it in the same statement.
 
-        Returns ``{user_id, code_verifier, redirect_uri, expires_at}`` or
-        ``None`` when the state is unknown or already used (single-use)."""
+        Returns ``{user_id, code_verifier, redirect_uri, issuer, expires_at}``
+        or ``None`` when the state is unknown or already used (single-use)."""
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT user_id, verifier_ciphertext, redirect_uri, expires_at "
+                "SELECT user_id, verifier_ciphertext, redirect_uri, issuer, expires_at "
                 "FROM oauth_flows WHERE state = ?",
                 (state,),
             ).fetchone()
@@ -562,6 +572,7 @@ class Store:
             "user_id": int(row["user_id"]),
             "code_verifier": verifier,
             "redirect_uri": row["redirect_uri"],
+            "issuer": row["issuer"],
             "expires_at": row["expires_at"],
         }
 

@@ -119,7 +119,7 @@ deliberately stay out of the GUI:
 | `DEMO_ENCRYPTION_KEY` | Fernet key that encrypts stored MCip API keys at rest. Rotating it disconnects everyone. |
 | `DEMO_SESSION_SECRET` | Signs the demo's session cookies (32+ random characters). |
 | `MCIP_BASE_URL` | Optional first-run default for the MCip address, used until an admin saves one in Settings. |
-| `DEMO_PUBLIC_URL` | Optional. The demo's public origin (`https://demo.example`) used to build the OAuth redirect URI; without it the request's own origin is used. Register `DEMO_PUBLIC_URL + /api/oauth/callback` on the MCip client. |
+| `DEMO_PUBLIC_URL` | The demo's public origin (`https://demo.example`), used to build the OAuth redirect URI. **Required in `oauth` mode** (a Host-derived redirect URI fails MCip's exact-match check; Settings warns when it is missing); optional in `pat` mode. Register `DEMO_PUBLIC_URL + /api/oauth/callback` on the MCip client. |
 | `DEMO_ALLOW_INSECURE_MCIP` | `false` (default). `true` allows an `http://` MCip address for a non-local host (labs only). |
 | `DEMO_ALLOW_REGISTER` | `false` (default): accounts are created with the admin CLI. `true` opens self-registration. |
 | `DEMO_HTTPS_ONLY` | `true` when served over HTTPS: cookies get the `Secure` flag and HSTS is sent. |

@@ -256,6 +256,40 @@ async def oauth_token_request(
     return body
 
 
+async def fetch_issuer(
+    base_url: str,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+    timeout_s: float = 15.0,
+) -> str:
+    """The AS metadata's ``issuer`` (RFC 8414, §16.1).
+
+    The callback compares the authorization response's ``iss`` against the
+    value recorded here **exactly** (RFC 9207 §2.4), so it must be the
+    deployment's real issuer — not the base URL we happen to call. Raises
+    :class:`OAuthProtocolError` when the document is missing, unreadable or
+    carries no usable issuer; the caller fails the connect closed.
+    """
+    async with httpx.AsyncClient(
+        base_url=base_url.rstrip("/"), transport=transport, timeout=timeout_s
+    ) as http:
+        response = await http.get("/.well-known/oauth-authorization-server")
+    if not response.is_success:
+        raise OAuthProtocolError(
+            response.status_code,
+            "metadata_unavailable",
+            f"metadata answered HTTP {response.status_code}",
+        )
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise OAuthProtocolError(200, "metadata_invalid", "metadata is not JSON") from exc
+    issuer = body.get("issuer") if isinstance(body, dict) else None
+    if not isinstance(issuer, str) or not issuer.strip():
+        raise OAuthProtocolError(200, "metadata_invalid", "metadata carries no issuer")
+    return issuer.strip()
+
+
 async def oauth_revoke_token(
     base_url: str,
     *,
