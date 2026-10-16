@@ -421,6 +421,17 @@ Codes are single-use (a reused code revokes the tokens of its first redemption) 
 60 seconds. `expires_in` is the client's access-token TTL (default 30 min, 5–60 per
 client).
 
+**`private_key_jwt` (no client secret).** A client set to the `private_key_jwt` auth method
+authenticates with a signed assertion instead of the Basic header: send
+`client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer` and
+`client_assertion=<JWT>`. Sign with a key whose **public** half is registered on the client
+(`PS256`/`ES256`/`EdDSA`); the JWT carries `iss` = `sub` = your `client_id`, `aud` = the MCip
+issuer (exactly — not the token URL, not a list), `exp` within 5 minutes, `iat`/`nbf` no more
+than 10 s in the future, and a unique `jti` per call. Register the public JWKS (paste) or an
+https `jwks_uri` (fetched through the SSRF guard, cached 5 minutes, rotations picked up
+automatically). Basic plus an assertion is `invalid_request`; assertion failures are the usual
+`invalid_client`.
+
 ### 14.3 Call `/ext` with the access token
 
 Exactly the endpoints of §4–§5, with the OAuth token instead of a key:
