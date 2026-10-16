@@ -444,6 +444,11 @@ Do **not** send `X-MCip-Client-Key` on this path (the client authenticated at th
 endpoint; a second client credential is `400 AMBIGUOUS_PRINCIPAL`). The token's scopes
 are re-checked against the client's *current* settings on every request.
 
+**OAuth-only clients.** An org admin can flip a client to **OAuth only**: its static keys (PATs
+and the client key) then answer `401 OAUTH_REQUIRED` while OAuth keeps working. If this demo runs
+in `pat` mode against such a client it will stop working — switch it to OAuth mode, or turn the
+switch off (it is fully reversible).
+
 ### 14.4 Refresh (no rotation)
 
 ```
