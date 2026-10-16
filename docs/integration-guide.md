@@ -378,7 +378,7 @@ GET https://<mcip-host>/api/v1/oauth/authorize
   &client_id=mcip_cli_<...>
   &redirect_uri=https%3A%2F%2Fyour-app.example%2Foauth%2Fcallback
   &scope=chat
-  &state=<opaque, 8+ chars>
+  &state=<required: non-empty, up to 512 characters>
   &code_challenge=<base64url(sha256(code_verifier))>
   &code_challenge_method=S256
 ```
@@ -394,7 +394,7 @@ publishes it). A denial returns `error=access_denied` with `state` and `iss` ins
 
 ```
 POST https://<mcip-host>/api/v1/oauth/token
-Authorization: Basic base64(urlencode(client_id) ":" urlencode(client_key))
+Authorization: Basic base64(client_id ":" client_key)
 Content-Type: application/x-www-form-urlencoded
 
 grant_type=authorization_code
@@ -412,6 +412,10 @@ grant_type=authorization_code
   "refresh_token": "ss_ort_<...>"
 }
 ```
+
+The token endpoint's Basic header decodes to `client_id ":" client_key`; the server splits the
+decoded value on the **first** `:` and does not URL-decode. Both parts are URL-safe
+(`mcip_cli_…` / `ss_cli_…`), so encode them as-is — the same form is used below (§14.4, §14.5).
 
 Codes are single-use (a reused code revokes the tokens of its first redemption) and live
 60 seconds. `expires_in` is the client's access-token TTL (default 30 min, 5–60 per
@@ -438,10 +442,11 @@ Authorization: Basic base64(client_id ":" client_key)
 grant_type=refresh_token&refresh_token=<the ss_ort_ token>
 ```
 
-The answer carries a **new `access_token` and the same `refresh_token`** — MCip does not
-rotate refresh tokens. Refresh tokens expire after 30 days idle or 365 days absolute, and
-the grant can be revoked by the user (Connected apps), an org admin, or deactivation. When
-it stops working you get `invalid_grant`: start a new authorization.
+The answer carries a new `access_token` (with `token_type`, `expires_in` and `scope`) and
+**no `refresh_token`**. MCip does not rotate refresh tokens: keep the one you have; it stays
+valid until its idle or absolute limit (30 days idle / 365 days absolute), or until the grant
+is revoked — by the user (Connected apps), an org admin, or deactivation. When it stops
+working you get `invalid_grant`: start a new authorization.
 
 ### 14.5 Revoke
 
