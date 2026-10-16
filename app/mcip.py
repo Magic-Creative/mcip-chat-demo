@@ -11,11 +11,15 @@ retry), so this module only classifies failures (``ExtApiError``,
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+import secrets
 from collections.abc import AsyncIterator, Iterable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -147,6 +151,169 @@ class ChatStream:
 
 
 CLIENT_KEY_HEADER = "X-MCip-Client-Key"
+
+# --- OAuth 2.1 authorization code + PKCE (#1389, Guide §16) ------------------
+
+#: Phase 1 lane A carries the chat scope; knowledge-base scopes land with the
+#: KB integration. The demo only asks for what it uses.
+OAUTH_SCOPE = "chat"
+#: How long a browser may sit on MCip's consent page before the state dies.
+OAUTH_FLOW_TTL_S = 600
+
+
+class OAuthProtocolError(Exception):
+    """A non-2xx ``/oauth/token`` answer: RFC 6749 §5.2 ``{error, ...}``.
+
+    ``error`` is the protocol code (``invalid_grant``, ``invalid_client``,
+    ``temporarily_unavailable`` …); callers branch on it (``invalid_grant``
+    means reconnect, ``temporarily_unavailable`` means retry later).
+    """
+
+    def __init__(self, status_code: int, error: str, description: str = ""):
+        self.status_code = status_code
+        self.error = error
+        self.description = description
+        super().__init__(f"{status_code} {error}: {description}")
+
+
+def generate_state() -> str:
+    """The CSRF handle of one authorization (URL-safe, single use)."""
+    return secrets.token_urlsafe(32)
+
+
+def generate_code_verifier() -> str:
+    """RFC 7636 §4.1: 43–128 chars (64 random bytes ≈ 86 chars)."""
+    return secrets.token_urlsafe(64)
+
+
+def code_challenge_for(verifier: str) -> str:
+    """S256: base64url(sha256(verifier)) without padding."""
+    digest = hashlib.sha256(verifier.encode()).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
+def build_authorize_url(
+    base_url: str,
+    *,
+    client_id: str,
+    redirect_uri: str,
+    state: str,
+    code_challenge: str,
+) -> str:
+    """The browser URL (§16.1): every parameter explicit, PKCE S256."""
+    query = urlencode(
+        {
+            "response_type": "code",
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "scope": OAUTH_SCOPE,
+            "state": state,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+        }
+    )
+    return f"{base_url.rstrip('/')}{API_PREFIX}/oauth/authorize?{query}"
+
+
+def _basic_auth(client_id: str, client_key: str) -> str:
+    """RFC 6749 §2.3.1: form-urlencoded parts, then base64."""
+    raw = f"{quote(client_id, safe='')}:{quote(client_key, safe='')}".encode()
+    return base64.b64encode(raw).decode()
+
+
+async def oauth_token_request(
+    base_url: str,
+    *,
+    client_id: str,
+    client_key: str,
+    form: dict[str, str],
+    transport: httpx.AsyncBaseTransport | None = None,
+    timeout_s: float = 30.0,
+) -> dict[str, Any]:
+    """``POST /oauth/token`` with Basic client auth (§16.2, §16.4).
+
+    Raises :class:`OAuthProtocolError` for RFC 6749 §5.2 bodies and lets
+    ``httpx.TransportError`` through (the caller decides reconnect vs retry).
+    """
+    async with httpx.AsyncClient(
+        base_url=base_url.rstrip("/"), transport=transport, timeout=timeout_s
+    ) as http:
+        response = await http.post(
+            f"{API_PREFIX}/oauth/token",
+            data=form,
+            headers={
+                "Authorization": f"Basic {_basic_auth(client_id, client_key)}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+        )
+    body = _error_body(response)
+    if not response.is_success:
+        raise OAuthProtocolError(
+            response.status_code,
+            str(body.get("error") or f"HTTP_{response.status_code}"),
+            str(body.get("error_description") or ""),
+        )
+    return body
+
+
+async def fetch_issuer(
+    base_url: str,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+    timeout_s: float = 15.0,
+) -> str:
+    """The AS metadata's ``issuer`` (RFC 8414, §16.1).
+
+    The callback compares the authorization response's ``iss`` against the
+    value recorded here **exactly** (RFC 9207 §2.4), so it must be the
+    deployment's real issuer — not the base URL we happen to call. Raises
+    :class:`OAuthProtocolError` when the document is missing, unreadable or
+    carries no usable issuer; the caller fails the connect closed.
+    """
+    async with httpx.AsyncClient(
+        base_url=base_url.rstrip("/"), transport=transport, timeout=timeout_s
+    ) as http:
+        response = await http.get("/.well-known/oauth-authorization-server")
+    if not response.is_success:
+        raise OAuthProtocolError(
+            response.status_code,
+            "metadata_unavailable",
+            f"metadata answered HTTP {response.status_code}",
+        )
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise OAuthProtocolError(200, "metadata_invalid", "metadata is not JSON") from exc
+    issuer = body.get("issuer") if isinstance(body, dict) else None
+    if not isinstance(issuer, str) or not issuer.strip():
+        raise OAuthProtocolError(200, "metadata_invalid", "metadata carries no issuer")
+    return issuer.strip()
+
+
+async def oauth_revoke_token(
+    base_url: str,
+    *,
+    client_id: str,
+    client_key: str,
+    token: str,
+    transport: httpx.AsyncBaseTransport | None = None,
+    timeout_s: float = 30.0,
+) -> bool:
+    """``POST /oauth/revoke`` (§16.5). RFC 7009 answers 200 for known,
+    unknown and already-revoked tokens alike; ``False`` means MCip refused
+    the request itself (the caller still deletes locally)."""
+    async with httpx.AsyncClient(
+        base_url=base_url.rstrip("/"), transport=transport, timeout=timeout_s
+    ) as http:
+        response = await http.post(
+            f"{API_PREFIX}/oauth/revoke",
+            data={"token": token},
+            headers={
+                "Authorization": f"Basic {_basic_auth(client_id, client_key)}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+        )
+    return response.is_success
 
 
 class McipClient:

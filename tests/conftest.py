@@ -22,6 +22,7 @@ os.environ["DEMO_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
 os.environ["DEMO_SESSION_SECRET"] = "test-session-secret-" + "x" * 24
 os.environ["DEMO_DB_PATH"] = str(_TMP / "module-import.db")
 os.environ["MCIP_BASE_URL"] = "http://mcip.test"
+os.environ["DEMO_PUBLIC_URL"] = "http://demo.test"
 os.environ["DEMO_HTTPS_ONLY"] = "false"
 
 from app.config import Settings  # noqa: E402

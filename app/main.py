@@ -28,20 +28,21 @@ import hashlib
 import json
 import logging
 import mimetypes
+import os
 import secrets
 import time
 from collections import deque
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hmac import compare_digest
 from pathlib import Path
 from typing import Annotated, Any
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 from fastapi import Depends, FastAPI, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -49,11 +50,28 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import Settings, load_settings
 from app.errors import DemoError, advice
-from app.mcip import CLIENT_KEY_HEADER, ExtApiError, McipClient
+from app.mcip import (
+    CLIENT_KEY_HEADER,
+    OAUTH_FLOW_TTL_S,
+    ExtApiError,
+    McipClient,
+    OAuthProtocolError,
+    build_authorize_url,
+    code_challenge_for,
+    fetch_issuer,
+    generate_code_verifier,
+    generate_state,
+    oauth_revoke_token,
+    oauth_token_request,
+)
 from app.relay import relay_turn, translate_ext_error
 from app.store import (
+    AUTH_MODE_OAUTH,
+    AUTH_MODE_PAT,
+    SETTING_AUTH_MODE,
     SETTING_BASE_URL,
     SETTING_CLIENT_KEY_PREFIX,
+    SETTING_OAUTH_CLIENT_ID,
     Store,
     key_prefix,
     redact,
@@ -129,6 +147,12 @@ class SettingsUpdate(BaseModel):
     #: The API client key (``ss_cli_…``); write-only, like user keys.
     client_key: str | None = Field(default=None, min_length=1, max_length=256)
     clear_client_key: bool = False
+    #: 'pat' (users paste a key) or 'oauth' (Connect MCip, #1389).
+    auth_mode: str | None = Field(default=None, pattern="^(pat|oauth)$")
+    #: The registered OAuth client id (``mcip_cli_…``); never a secret, so it
+    #: is read back like the base URL.
+    oauth_client_id: str | None = Field(default=None, min_length=1, max_length=128)
+    clear_oauth_client_id: bool = False
 
 
 class ConnectRequest(BaseModel):
@@ -340,8 +364,15 @@ def create_app(
                 expires_days = (moment - datetime.now(UTC)).days
             except ValueError:
                 expires_at = None
+        auth_mode = connection.get("auth_mode") or AUTH_MODE_PAT
+        expires_at = connection.get("expires_at")
+        if auth_mode == AUTH_MODE_OAUTH:
+            # OAuth connections age by the access token (refreshed silently),
+            # not by a key expiry; the UI shows the mode instead.
+            expires_at = None
         return {
             "connected": True,
+            "auth_mode": auth_mode,
             "display_name": connection.get("display_name"),
             "email": connection.get("email"),
             "api_client_name": connection.get("api_client_name"),
@@ -363,6 +394,91 @@ def create_app(
         stored = await asyncio.to_thread(store.get_setting, SETTING_BASE_URL)
         return (stored or settings.mcip_base_url or "").rstrip("/")
 
+    async def get_auth_mode() -> str:
+        """The configured connection mode: 'pat' (default) or 'oauth'."""
+        stored = await asyncio.to_thread(store.get_setting, SETTING_AUTH_MODE)
+        return stored if stored in {AUTH_MODE_PAT, AUTH_MODE_OAUTH} else AUTH_MODE_PAT
+
+    async def get_oauth_client_id() -> str | None:
+        return await asyncio.to_thread(store.get_setting, SETTING_OAUTH_CLIENT_ID)
+
+    def configured_public_url() -> str | None:
+        return os.environ.get("DEMO_PUBLIC_URL", "").strip().rstrip("/") or None
+
+    def public_redirect_uri(request: Request) -> str:
+        """The callback URI MCip must have registered, exactly (#1389).
+
+        ``DEMO_PUBLIC_URL`` overrides the request-derived origin for exactness
+        behind proxies; the admin page shows the value to register. In OAuth
+        mode the start route requires it (#1439 review item 2): a
+        Host-header-derived redirect URI fails MCip's exact-match check, so
+        the demo would rather refuse than be at the mercy of the proxy.
+        """
+        base = configured_public_url() or str(request.base_url).rstrip("/")
+        return f"{base}/api/oauth/callback"
+
+    async def refresh_oauth_tokens(user_id: int) -> bool:
+        """Exchange the refresh token for a new access token (no rotation).
+
+        Returns False when the grant is gone (``invalid_grant`` …) or MCip is
+        unreachable — every False answer is a reconnect, and the connection
+        is dropped so the UI offers one."""
+        tokens = await asyncio.to_thread(store.get_oauth_tokens, user_id)
+        if tokens is None or not tokens.get("refresh_token"):
+            return False
+        client_id = await get_oauth_client_id()
+        client_key = await asyncio.to_thread(store.get_client_key)
+        if not client_id or not client_key:
+            return False
+        try:
+            body = await oauth_token_request(
+                await current_base_url(),
+                client_id=client_id,
+                client_key=client_key,
+                form={
+                    "grant_type": "refresh_token",
+                    "refresh_token": tokens["refresh_token"],
+                },
+                transport=mcip_transport,
+            )
+        except (OAuthProtocolError, httpx.HTTPError) as exc:
+            logger.warning("oauth refresh failed for user=%s: %s", user_id, redact(str(exc))[:200])
+            if isinstance(exc, OAuthProtocolError) and exc.error in {
+                # The reconnect UX relies on `invalid_grant`/`invalid_client`.
+                # `unauthorized_client` is kept as a defensive member only —
+                # phase-1 MCip never returns it (a non-enabled grant type
+                # answers `unsupported_grant_type`, #1437 review).
+                "invalid_grant",
+                "invalid_client",
+                "unauthorized_client",
+            }:
+                await asyncio.to_thread(store.delete_connection, user_id)
+            return False
+        access = str(body.get("access_token") or "")
+        if not access:
+            return False
+        await asyncio.to_thread(
+            store.update_oauth_access,
+            user_id,
+            access_token=access,
+            access_expires_at=_expiry_iso(body.get("expires_in")),
+        )
+        return True
+
+    async def refresh_if_expiring(user_id: int, connection: dict[str, Any]) -> None:
+        """Proactively refresh when the access token is at/near its TTL."""
+        if connection.get("auth_mode") != AUTH_MODE_OAUTH:
+            return
+        expires_at = connection.get("access_expires_at")
+        if expires_at:
+            try:
+                moment = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+                if (moment - datetime.now(UTC)).total_seconds() > TOKEN_REFRESH_SKEW_S:
+                    return
+            except ValueError:
+                pass
+        await refresh_oauth_tokens(user_id)
+
     async def mcip_client(key: str) -> McipClient:
         base_url = await current_base_url()
         if not base_url:
@@ -373,10 +489,50 @@ def create_app(
         return McipClient(base_url, key, client_key=client_key, transport=mcip_transport)
 
     async def open_mcip(user_id: int) -> McipClient:
+        """One client for this user: their PAT, or a live OAuth access token.
+
+        OAuth mode refreshes proactively when the access token is expired or
+        close to it; a refresh that fails drops the connection and answers
+        the reconnect error."""
+        connection = await asyncio.to_thread(store.get_connection, user_id)
+        if connection is None:
+            raise api_error(401, "NOT_CONNECTED", "Connect your MCip key first.")
+        if connection.get("auth_mode") == AUTH_MODE_OAUTH:
+            await refresh_if_expiring(user_id, connection)
+            tokens = await asyncio.to_thread(store.get_oauth_tokens, user_id)
+            if tokens is None:
+                raise api_error(401, "NOT_CONNECTED", "Connect your MCip key first.")
+            access = tokens.get("access_token")
+            if not access:
+                raise api_error(
+                    401,
+                    "OAUTH_RECONNECT",
+                    "The MCip connection expired. Connect again.",
+                )
+            return await mcip_client(str(access))
         key = await asyncio.to_thread(store.get_api_key, user_id)
         if not key:
             raise api_error(401, "NOT_CONNECTED", "Connect your MCip key first.")
         return await mcip_client(key)
+
+    async def authorized_json(user_id: int, action):
+        """One JSON call with the single OAuth retry (§1389).
+
+        A 401 ``OAUTH_TOKEN_EXPIRED`` that MCip still emitted (clock skew,
+        revoked-and-reissued) refreshes once and retries; everything else
+        passes through to the caller's ``translate_ext_error``."""
+        client = await open_mcip(user_id)
+        async with client:
+            try:
+                return await action(client)
+            except ExtApiError as exc:
+                if exc.status_code != 401 or exc.error_code != "OAUTH_TOKEN_EXPIRED":
+                    raise
+        if not await refresh_oauth_tokens(user_id):
+            raise
+        client = await open_mcip(user_id)
+        async with client:
+            return await action(client)
 
     async def require_admin(request: Request) -> int:
         user_id = await require_user(request)
@@ -408,7 +564,7 @@ def create_app(
             )
         return value
 
-    async def settings_view() -> dict[str, Any]:
+    async def settings_view(request: Request | None = None) -> dict[str, Any]:
         """Admin settings as the browser may see them — never the client key."""
         rows = await asyncio.to_thread(store.get_settings)
         base = rows.get(SETTING_BASE_URL)
@@ -427,6 +583,10 @@ def create_app(
             "client_key_prefix": prefix["value"] if prefix else None,
             "client_key_updated_at": prefix["updated_at"] if prefix else None,
             "client_key_updated_by": prefix["updated_by"] if prefix else None,
+            "auth_mode": await get_auth_mode(),
+            "oauth_client_id": await get_oauth_client_id(),
+            "oauth_redirect_uri": public_redirect_uri(request) if request is not None else None,
+            "public_url_configured": configured_public_url() is not None,
         }
 
     # -- error handling -----------------------------------------------------
@@ -524,6 +684,7 @@ def create_app(
             "allow_register": settings.allow_register,
             "configured": bool(base_url),
             "mcip_host": (urlsplit(base_url).netloc or base_url) if base_url else None,
+            "auth_mode": await get_auth_mode(),
             "user": None,
             "connection": None,
         }
@@ -605,8 +766,18 @@ def create_app(
 
     @app.post("/api/connection", dependencies=[Depends(require_csrf)])
     async def connect(request: Request, payload: ConnectRequest, user_id: UserId) -> dict[str, Any]:
-        """Connect MCip: validate the key with ``GET /me``, then store it."""
+        """Connect MCip with a pasted key (PAT mode only).
+
+        The paste path stays behind the ``mcip_auth_mode`` setting (#1389):
+        flipping to 'oauth' disables it without removing the code, so a
+        deployment can roll back by flipping the setting back."""
         enforce_limit(f"connect:{user_id}", settings.login_rate_per_minute, "Too many attempts.")
+        if await get_auth_mode() != AUTH_MODE_PAT:
+            raise api_error(
+                409,
+                "PAT_DISABLED",
+                "This demo uses Connect MCip (OAuth). Ask the demo admin to switch modes.",
+            )
         key = payload.key.strip()
         if not key.startswith("ss_pat_"):
             raise api_error(
@@ -638,10 +809,208 @@ def create_app(
 
     @app.delete("/api/connection", dependencies=[Depends(require_csrf)])
     async def disconnect(user_id: UserId) -> dict[str, Any]:
-        """Forget the key here. The key itself stays valid in MCip until the
-        user deletes it at /user-settings/api-key (Guide §11)."""
+        """Forget the credential here.
+
+        PAT mode: the key itself stays valid in MCip until the user deletes
+        it at /user-settings/api-key (Guide §11). OAuth mode (#1389): the
+        refresh token is revoked at MCip first (RFC 7009), then deleted
+        locally; a failed revoke (MCip unreachable) is reported as
+        ``revoked: false`` but never blocks the local delete."""
+        connection = await asyncio.to_thread(store.get_connection, user_id)
+        revoked: bool | None = None
+        if connection is not None and connection.get("auth_mode") == AUTH_MODE_OAUTH:
+            tokens = await asyncio.to_thread(store.get_oauth_tokens, user_id)
+            client_id = await get_oauth_client_id()
+            client_key = await asyncio.to_thread(store.get_client_key)
+            if tokens is None:
+                revoked = True  # nothing stored, nothing to revoke
+            elif not client_id or not client_key:
+                revoked = False
+            else:
+                try:
+                    revoked = await oauth_revoke_token(
+                        await current_base_url(),
+                        client_id=client_id,
+                        client_key=client_key,
+                        token=tokens.get("refresh_token") or tokens.get("access_token") or "",
+                        transport=mcip_transport,
+                    )
+                except httpx.HTTPError as exc:
+                    logger.warning(
+                        "oauth revoke unreachable for user=%s: %s",
+                        user_id,
+                        redact(str(exc))[:200],
+                    )
+                    revoked = False
+                if not revoked:
+                    logger.warning(
+                        "oauth revoke refused for user=%s; deleting locally anyway", user_id
+                    )
         await asyncio.to_thread(store.delete_connection, user_id)
-        return {"connection": None}
+        return {"connection": None, **({"revoked": revoked} if revoked is not None else {})}
+
+    @app.get("/api/oauth/start")
+    async def oauth_start(request: Request, user_id: UserId) -> RedirectResponse:
+        """Begin Connect MCip (#1389, Guide §16.1).
+
+        Generates the PKCE pair and the state, parks them **server-side**
+        (``oauth_flows``; the verifier is Fernet-encrypted and never leaves
+        the backend), and 303s the browser to MCip's authorize endpoint."""
+        if await get_auth_mode() != AUTH_MODE_OAUTH:
+            raise api_error(409, "OAUTH_DISABLED", "This demo connects with a pasted key.")
+        client_id = await get_oauth_client_id()
+        if not client_id:
+            raise api_error(
+                503,
+                "OAUTH_NOT_CONFIGURED",
+                "The demo admin must set the OAuth client id in Settings.",
+            )
+        base_url = await current_base_url()
+        if not base_url:
+            raise api_error(
+                503, "DEMO_NOT_CONFIGURED", "The demo admin has not set the MCip address yet."
+            )
+        if not configured_public_url():
+            raise api_error(
+                503,
+                "OAUTH_PUBLIC_URL_UNSET",
+                "The demo admin must set DEMO_PUBLIC_URL in oauth mode.",
+            )
+        enforce_limit(f"connect:{user_id}", settings.login_rate_per_minute, "Too many attempts.")
+        try:
+            issuer = await fetch_issuer(base_url, transport=mcip_transport)
+        except (OAuthProtocolError, httpx.HTTPError) as exc:
+            logger.warning("oauth start: metadata unreachable: %s", redact(str(exc))[:200])
+            raise api_error(
+                503,
+                "OAUTH_METADATA_UNREACHABLE",
+                "MCip's OAuth metadata is unreachable; check the MCip address.",
+            ) from exc
+        state = generate_state()
+        verifier = generate_code_verifier()
+        redirect_uri = public_redirect_uri(request)
+        await asyncio.to_thread(
+            store.create_oauth_flow,
+            user_id,
+            state=state,
+            code_verifier=verifier,
+            redirect_uri=redirect_uri,
+            issuer=issuer,
+            expires_at=_iso_in(OAUTH_FLOW_TTL_S),
+        )
+        target = build_authorize_url(
+            base_url,
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            state=state,
+            code_challenge=code_challenge_for(verifier),
+        )
+        logger.info("oauth start user=%s client_id=%s", user_id, client_id)
+        return RedirectResponse(target, status_code=303)
+
+    @app.get("/api/oauth/callback")
+    async def oauth_callback(request: Request, user_id: UserId) -> RedirectResponse:
+        """MCip's redirect back: verify state, exchange the code, store tokens.
+
+        Every failure returns the browser to ``/`` with ``oauth_error`` and
+        ``oauth_error_code`` in the query (the UI shows the advice); the
+        success path hands over to the same session flow as a PAT connect."""
+        params = request.query_params
+
+        def fail(code: str, message: str) -> RedirectResponse:
+            logger.warning("oauth callback user=%s failed: %s", user_id, code)
+            query = urlencode_query({"oauth_error": message, "oauth_error_code": code})
+            return RedirectResponse(f"/?{query}", status_code=303)
+
+        state = (params.get("state") or "").strip()
+        if not state:
+            return fail("OAUTH_STATE_MISSING", "MCip sent no state back; start again.")
+        flow = await asyncio.to_thread(store.consume_oauth_flow, state)
+        if flow is None or flow["user_id"] != user_id:
+            return fail("OAUTH_STATE_UNKNOWN", "This connect attempt expired; start again.")
+        if _iso_expired(flow["expires_at"]):
+            return fail("OAUTH_FLOW_EXPIRED", "This connect attempt expired; start again.")
+        if params.get("error"):
+            reason = params.get("error")
+            if reason == "access_denied":
+                return fail("OAUTH_DENIED", "The connection request was denied in MCip.")
+            return fail("OAUTH_FAILED", f"MCip refused the request ({reason}).")
+        code = (params.get("code") or "").strip()
+        if not code:
+            return fail("OAUTH_CODE_MISSING", "MCip sent no authorization code; start again.")
+        iss = (params.get("iss") or "").strip()
+        base_url = await current_base_url()
+        # S3/RFC 9207 §2.4: exact string match against the issuer the flow
+        # started with (the AS metadata we fetched at /start) — not an origin
+        # compare, which would accept a different issuer path (#1439 review).
+        if not iss:
+            return fail("OAUTH_ISS_MISSING", "MCip sent no issuer; start again.")
+        if iss != (flow.get("issuer") or ""):
+            return fail("OAUTH_ISS_MISMATCH", "The response came from a different MCip issuer.")
+        client_id = await get_oauth_client_id()
+        client_key = await asyncio.to_thread(store.get_client_key)
+        if not client_id or not client_key:
+            return fail(
+                "OAUTH_NOT_CONFIGURED",
+                "The demo admin must set the OAuth client id and client key in Settings.",
+            )
+        try:
+            body = await oauth_token_request(
+                base_url,
+                client_id=client_id,
+                client_key=client_key,
+                form={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": flow["redirect_uri"],
+                    "code_verifier": flow["code_verifier"],
+                },
+                transport=mcip_transport,
+            )
+        except OAuthProtocolError as exc:
+            return fail("OAUTH_EXCHANGE_FAILED", f"MCip refused the code exchange ({exc.error}).")
+        except httpx.HTTPError:
+            return fail("OAUTH_EXCHANGE_UNREACHABLE", "MCip was unreachable; start again.")
+        access = str(body.get("access_token") or "")
+        refresh = str(body.get("refresh_token") or "")
+        if not access or not refresh:
+            return fail("OAUTH_EXCHANGE_FAILED", "MCip's token response was incomplete.")
+        try:
+            async with McipClient(
+                base_url, access, client_key=client_key, transport=mcip_transport
+            ) as mcip:
+                me = await mcip.me()
+        except ExtApiError as exc:
+            return fail(
+                "OAUTH_ME_FAILED",
+                f"MCip refused the new token ({exc.error_code}); start again.",
+            )
+        except httpx.HTTPError:
+            return fail("OAUTH_EXCHANGE_UNREACHABLE", "MCip was unreachable; start again.")
+        user = me.get("user") or {}
+        client = me.get("api_client") or {}
+        key_info = me.get("key") or {}
+        await asyncio.to_thread(
+            store.save_oauth_connection,
+            user_id,
+            access_token=access,
+            access_expires_at=key_info.get("expires_at") or _expiry_iso(body.get("expires_in")),
+            refresh_token=refresh,
+            prefix=str(key_info.get("prefix") or key_prefix(access)),
+            mcip_user_id=user.get("id"),
+            display_name=user.get("display_name"),
+            email=user.get("email"),
+            api_client_name=client.get("name"),
+            workspaces=list(me.get("workspaces") or []),
+        )
+        # PII: never the full address in logs (#1439 review item 3).
+        logger.info(
+            "oauth connected user=%s as %s (client_id=%s)",
+            user_id,
+            _mask_email(user.get("email")),
+            client_id,
+        )
+        return RedirectResponse("/?connected=oauth", status_code=303)
 
     @app.put("/api/connection/workspace", dependencies=[Depends(require_csrf)])
     async def choose_workspace(payload: WorkspaceRequest, user_id: UserId) -> dict[str, Any]:
@@ -673,12 +1042,10 @@ def create_app(
         connection = await asyncio.to_thread(store.get_connection, user_id)
         if connection is None:
             raise api_error(401, "NOT_CONNECTED", "Connect your MCip key first.")
-        mcip = await open_mcip(user_id)
-        async with mcip:
-            try:
-                me = await mcip.me()
-            except ExtApiError as exc:
-                raise translate_ext_error(exc) from exc
+        try:
+            me = await authorized_json(user_id, lambda mcip: mcip.me())
+        except ExtApiError as exc:
+            raise translate_ext_error(exc) from exc
         user = me.get("user") or {}
         key_info = me.get("key") or {}
         client = me.get("api_client") or {}
@@ -706,21 +1073,21 @@ def create_app(
                 )
             elif allowed[active_id] != connection.get("workspace_name"):
                 # renamed in MCip: keep the choice, refresh the stored name
-                await asyncio.to_thread(
-                    store.set_workspace, user_id, active_id, allowed[active_id]
-                )
+                await asyncio.to_thread(store.set_workspace, user_id, active_id, allowed[active_id])
         connection = await asyncio.to_thread(store.get_connection, user_id)
         return {"connection": connection_view(connection), "workspace_removed": workspace_removed}
 
     # -- admin settings (demo admins only) ----------------------------------
 
     @app.get("/api/admin/settings")
-    async def get_admin_settings(admin_id: int = Depends(require_admin)) -> dict[str, Any]:
-        return {"settings": await settings_view()}
+    async def get_admin_settings(
+        request: Request, admin_id: int = Depends(require_admin)
+    ) -> dict[str, Any]:
+        return {"settings": await settings_view(request)}
 
     @app.put("/api/admin/settings", dependencies=[Depends(require_csrf)])
     async def update_admin_settings(
-        payload: SettingsUpdate, admin_id: int = Depends(require_admin)
+        payload: SettingsUpdate, request: Request, admin_id: int = Depends(require_admin)
     ) -> dict[str, Any]:
         """Save the MCip base URL and/or the API client key.
 
@@ -731,7 +1098,32 @@ def create_app(
         by = admin["username"] if admin else None
         if payload.client_key is not None and payload.clear_client_key:
             raise api_error(400, "VALIDATION_ERROR", "Set a new client key or clear it, not both.")
+        if payload.oauth_client_id is not None and payload.clear_oauth_client_id:
+            raise api_error(400, "VALIDATION_ERROR", "Set a new client id or clear it, not both.")
         changed: list[str] = []
+        if payload.auth_mode is not None:
+            current_mode = await get_auth_mode()
+            if payload.auth_mode != current_mode:
+                changed.append("auth_mode")
+            await asyncio.to_thread(
+                store.set_setting, SETTING_AUTH_MODE, payload.auth_mode, updated_by=by
+            )
+        if payload.oauth_client_id is not None:
+            new_client_id = payload.oauth_client_id.strip()
+            if not new_client_id.startswith("mcip_cli_"):
+                raise api_error(
+                    400,
+                    "DEMO_OAUTH_CLIENT_ID_FORMAT",
+                    "That does not look like an OAuth client id (mcip_cli_...).",
+                )
+            if new_client_id != await get_oauth_client_id():
+                await asyncio.to_thread(
+                    store.set_setting, SETTING_OAUTH_CLIENT_ID, new_client_id, updated_by=by
+                )
+                changed.append("oauth_client_id")
+        elif payload.clear_oauth_client_id and await get_oauth_client_id() is not None:
+            await asyncio.to_thread(store.set_setting, SETTING_OAUTH_CLIENT_ID, None, updated_by=by)
+            changed.append("oauth_client_id")
         if payload.mcip_base_url is not None:
             new_url = normalize_base_url(payload.mcip_base_url)
             if new_url != await current_base_url():
@@ -754,12 +1146,17 @@ def create_app(
             changed.append("client_key")
         disconnected = 0
         if changed:
+            # A base URL or client change invalidates every connection; a
+            # mode-only change keeps existing connections (PAT ones keep
+            # working under 'oauth', and vice versa, until the flag flips
+            # back). A client-id change also disconnects: OAuth connections
+            # belong to that client.
             disconnected = await asyncio.to_thread(store.delete_all_connections)
             logger.warning(
                 "admin %s changed %s; disconnected %d user(s)", by, ",".join(changed), disconnected
             )
         return {
-            "settings": await settings_view(),
+            "settings": await settings_view(request),
             "changed": changed,
             "disconnected": disconnected,
         }
@@ -913,9 +1310,7 @@ def create_app(
         connection = await asyncio.to_thread(store.get_connection, user_id)
         workspace_id = connection.get("workspace_id") if connection else None
         if workspace_id is not None:
-            await asyncio.to_thread(
-                store.adopt_orphan_conversations, user_id, int(workspace_id)
-            )
+            await asyncio.to_thread(store.adopt_orphan_conversations, user_id, int(workspace_id))
         row = await asyncio.to_thread(store.get_conversation, user_id, conversation_id)
         if row is None or workspace_id is None or row.get("workspace_id") != int(workspace_id):
             raise api_error(404, "CONVERSATION_NOT_FOUND", "That conversation does not exist.")
@@ -926,9 +1321,7 @@ def create_app(
         connection = await asyncio.to_thread(store.get_connection, user_id)
         workspace_id = connection.get("workspace_id") if connection else None
         if workspace_id is not None:
-            await asyncio.to_thread(
-                store.adopt_orphan_conversations, user_id, int(workspace_id)
-            )
+            await asyncio.to_thread(store.adopt_orphan_conversations, user_id, int(workspace_id))
         rows = await asyncio.to_thread(store.list_conversations, user_id, workspace_id)
         return {"conversations": rows}
 
@@ -942,12 +1335,12 @@ def create_app(
         mcip_id = row.get("mcip_conversation_id")
         if not mcip_id:
             return {"conversation_id": conversation_id, "messages": [], "has_more": False}
-        mcip = await open_mcip(user_id)
-        async with mcip:
-            try:
-                page = await mcip.messages(int(mcip_id), before=before)
-            except ExtApiError as exc:
-                raise translate_ext_error(exc) from exc
+        try:
+            page = await authorized_json(
+                user_id, lambda mcip: mcip.messages(int(mcip_id), before=before)
+            )
+        except ExtApiError as exc:
+            raise translate_ext_error(exc) from exc
         return {
             "conversation_id": conversation_id,
             "messages": page.get("messages") or [],
@@ -960,13 +1353,11 @@ def create_app(
         row = await scoped_conversation(user_id, conversation_id)
         mcip_id = row.get("mcip_conversation_id")
         if mcip_id:
-            mcip = await open_mcip(user_id)
-            async with mcip:
-                try:
-                    await mcip.delete_conversation(int(mcip_id))
-                except ExtApiError as exc:
-                    if exc.error_code != "CONVERSATION_NOT_FOUND":
-                        raise translate_ext_error(exc) from exc
+            try:
+                await authorized_json(user_id, lambda mcip: mcip.delete_conversation(int(mcip_id)))
+            except ExtApiError as exc:
+                if exc.error_code != "CONVERSATION_NOT_FOUND":
+                    raise translate_ext_error(exc) from exc
         await asyncio.to_thread(store.delete_conversation, user_id, conversation_id)
         return {"deleted": True, "conversation_id": conversation_id}
 
@@ -1018,9 +1409,8 @@ def create_app(
             )
         else:
             mcip_conversation_id = turn_request["mcip_conversation_id"]
-        mcip = await open_mcip(user_id)
 
-        async def event_stream() -> AsyncIterator[str]:
+        async def event_stream(mcip: McipClient) -> AsyncIterator[str]:
             try:
                 async for event in relay_turn(
                     mcip,
@@ -1078,16 +1468,31 @@ def create_app(
             finally:
                 await mcip.aclose()
 
-        stream = event_stream()
-        try:
-            first = await anext(stream)
-        except BaseException as exc:
-            if created_now:
-                await asyncio.to_thread(store.delete_conversation, user_id, conversation_id)
-            if isinstance(exc, DemoError):
-                # the browser still learns the id, so its Retry replays
-                exc.extra = {**exc.extra, "client_request_id": client_request_id}
-            raise
+        attempt = 0
+        while True:
+            mcip = await open_mcip(user_id)
+            stream = event_stream(mcip)
+            try:
+                first = await anext(stream)
+                break
+            except BaseException as exc:
+                if (
+                    attempt == 0
+                    and isinstance(exc, ExtApiError)
+                    and exc.error_code == "OAUTH_TOKEN_EXPIRED"
+                    and await refresh_oauth_tokens(user_id)
+                ):
+                    # §1389: one silent refresh-and-retry. The relay's
+                    # idempotency (same client_request_id) makes the re-send
+                    # safe even if the first attempt reached MCip.
+                    attempt = 1
+                    continue
+                if created_now:
+                    await asyncio.to_thread(store.delete_conversation, user_id, conversation_id)
+                if isinstance(exc, DemoError):
+                    # the browser still learns the id, so its Retry replays
+                    exc.extra = {**exc.extra, "client_request_id": client_request_id}
+                raise
 
         return StreamingResponse(
             _prepend(first, stream),
@@ -1098,8 +1503,49 @@ def create_app(
     return app
 
 
+#: Refresh the access token when less than this remains (#1389).
+TOKEN_REFRESH_SKEW_S = 120
+
+
+def _expiry_iso(expires_in: Any) -> str | None:
+    """ISO expiry from a token response's ``expires_in`` seconds."""
+    try:
+        seconds = int(expires_in)
+    except (TypeError, ValueError):
+        return None
+    if seconds <= 0:
+        return None
+    return (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat()
+
+
+def _iso_in(seconds: int) -> str:
+    return (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat()
+
+
+def _iso_expired(value: str | None) -> bool:
+    if not value:
+        return True
+    try:
+        moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return moment <= datetime.now(UTC)
+
+
+def _mask_email(email: object) -> str:
+    """`alice@example.com` -> `a***@example.com` for logs (#1439 review)."""
+    if not isinstance(email, str) or "@" not in email:
+        return "unknown"
+    local, _, domain = email.partition("@")
+    return f"{local[:1]}***@{domain}"
+
+
 def _sse(event: dict[str, Any]) -> str:
     return f"data: {json.dumps(event, separators=(',', ':'), ensure_ascii=False)}\n\n"
+
+
+def urlencode_query(values: dict[str, str]) -> str:
+    return urlencode(values)
 
 
 async def _prepend(first: str, rest: AsyncIterator[str]) -> AsyncIterator[str]:
