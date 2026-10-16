@@ -470,6 +470,16 @@ fails closed). `/ext` calls with an `ss_oat_` token answer the §6 error codes w
 addition: `OAUTH_TOKEN_INVALID`, `OAUTH_TOKEN_EXPIRED` (refresh) and `OAUTH_GRANT_REVOKED`
 (re-authorize), each `401` with `WWW-Authenticate: Bearer error="invalid_token"`.
 
+### 14.7 Lane B: `client_credentials` (machine-to-machine)
+
+When the client's admins enable it (grant type `client_credentials`, **Require client key** on, a
+non-empty IP allowlist), your system gets a token **as itself**: `POST /api/v1/oauth/token` with
+`grant_type=client_credentials` and a required `scope` ⊆ the client's current `admin_scopes`. The
+response has **no `refresh_token`** (request a fresh access token when it expires). The token works
+only on the admin surface (`GET /api/v1/ext/client`, `/api/v1/ext/admin/...`); the chat and
+knowledge-base routes refuse it (`403 OAUTH_TOKEN_LANE`), and combining it with
+`X-MCip-Client-Key` is `400 AMBIGUOUS_PRINCIPAL`.
+
 ## 15. FAQ
 
 
