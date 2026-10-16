@@ -432,6 +432,12 @@ https `jwks_uri` (fetched through the SSRF guard, cached 5 minutes, rotations pi
 automatically). Basic plus an assertion is `invalid_request`; assertion failures are the usual
 `invalid_client`.
 
+**Pushed authorization requests (PAR, optional).** Instead of putting all parameters in the
+`/authorize` URL, your backend can `POST /api/v1/oauth/par` (client-authenticated, same body as
+the authorize request) and get a single-use `request_uri` (`201`, `expires_in: 90`) to send the
+browser to `/authorize?client_id=…&request_uri=…` — nothing else may accompany it. Clients
+configured with `require_par` must use this form.
+
 ### 14.3 Call `/ext` with the access token
 
 Exactly the endpoints of §4–§5, with the OAuth token instead of a key:
