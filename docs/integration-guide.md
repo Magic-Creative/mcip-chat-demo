@@ -421,6 +421,23 @@ Codes are single-use (a reused code revokes the tokens of its first redemption) 
 60 seconds. `expires_in` is the client's access-token TTL (default 30 min, 5–60 per
 client).
 
+**`private_key_jwt` (no client secret).** A client set to the `private_key_jwt` auth method
+authenticates with a signed assertion instead of the Basic header: send
+`client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer` and
+`client_assertion=<JWT>`. Sign with a key whose **public** half is registered on the client
+(`PS256`/`ES256`/`EdDSA`); the JWT carries `iss` = `sub` = your `client_id`, `aud` = the MCip
+issuer (exactly — not the token URL, not a list), `exp` within 5 minutes, `iat`/`nbf` no more
+than 10 s in the future, and a unique `jti` per call. Register the public JWKS (paste) or an
+https `jwks_uri` (fetched through the SSRF guard, cached 5 minutes, rotations picked up
+automatically). Basic plus an assertion is `invalid_request`; assertion failures are the usual
+`invalid_client`.
+
+**Pushed authorization requests (PAR, optional).** Instead of putting all parameters in the
+`/authorize` URL, your backend can `POST /api/v1/oauth/par` (client-authenticated, same body as
+the authorize request) and get a single-use `request_uri` (`201`, `expires_in: 90`) to send the
+browser to `/authorize?client_id=…&request_uri=…` — nothing else may accompany it. Clients
+configured with `require_par` must use this form.
+
 ### 14.3 Call `/ext` with the access token
 
 Exactly the endpoints of §4–§5, with the OAuth token instead of a key:
@@ -432,6 +449,11 @@ Authorization: Bearer ss_oat_<...>
 Do **not** send `X-MCip-Client-Key` on this path (the client authenticated at the token
 endpoint; a second client credential is `400 AMBIGUOUS_PRINCIPAL`). The token's scopes
 are re-checked against the client's *current* settings on every request.
+
+**OAuth-only clients.** An org admin can flip a client to **OAuth only**: its static keys (PATs
+and the client key) then answer `401 OAUTH_REQUIRED` while OAuth keeps working. If this demo runs
+in `pat` mode against such a client it will stop working — switch it to OAuth mode, or turn the
+switch off (it is fully reversible).
 
 ### 14.4 Refresh (no rotation)
 
@@ -469,6 +491,18 @@ and `temporarily_unavailable` when MCip's Redis is down (the whole `/oauth/*` su
 fails closed). `/ext` calls with an `ss_oat_` token answer the §6 error codes with one
 addition: `OAUTH_TOKEN_INVALID`, `OAUTH_TOKEN_EXPIRED` (refresh) and `OAUTH_GRANT_REVOKED`
 (re-authorize), each `401` with `WWW-Authenticate: Bearer error="invalid_token"`.
+
+### 14.7 Lane B: `client_credentials` (machine-to-machine)
+
+When the client's admins enable it (grant type `client_credentials`, **Require client key** on, a
+non-empty IP allowlist), your system gets a token **as itself**: `POST /api/v1/oauth/token` with
+`grant_type=client_credentials` and a required `scope` ⊆ the client's current `admin_scopes`. The
+response has **no `refresh_token`** (request a fresh access token when it expires). A call is
+allowed when the route's scope is in the token's granted scope **and** in the client's *current*
+`admin_scopes` — access can be narrowed at any time. The token works
+only on the admin surface (`GET /api/v1/ext/client`, `/api/v1/ext/admin/...`); the chat and
+knowledge-base routes refuse it (`403 OAUTH_TOKEN_LANE`), and combining it with
+`X-MCip-Client-Key` is `400 AMBIGUOUS_PRINCIPAL`.
 
 ## 15. FAQ
 
