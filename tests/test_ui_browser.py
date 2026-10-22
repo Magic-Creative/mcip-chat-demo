@@ -303,3 +303,37 @@ async def test_the_developer_guide_and_live_api_spec_are_linked_for_signed_out_a
         await expect(page.locator('#sidebar-guide a[href$="api/v1/ext/docs"]')).to_be_visible()
     finally:
         await signed_in.close()
+
+
+async def test_the_connection_mode_switch_defaults_to_pat_and_offers_oauth(
+    browser: Browser, live_url: str, store: Store
+) -> None:
+    """#19: one global selector, ``pat`` by default, OAuth offered beside it."""
+    store.create_user("admin", "password123", is_admin=True)
+    async with httpx.AsyncClient(base_url=live_url) as client:
+        session = DemoSession(client)
+        await session.boot()
+        assert (await session.login("admin")).status_code == 200
+        cookies = [
+            {"name": cookie.name, "value": cookie.value, "url": live_url}
+            for cookie in client.cookies.jar
+        ]
+    context = await browser.new_context()
+    await context.add_cookies(cookies)
+    try:
+        page = await context.new_page()
+        await page.goto(live_url + "/")
+        await expect(page.locator("#settings-button")).to_be_visible()
+        await page.click("#settings-button")
+        select = page.locator("#settings-auth-mode")
+        await expect(select).to_have_value("pat")
+        options = await page.eval_on_selector_all(
+            "#settings-auth-mode option", "els => els.map(e => e.value)"
+        )
+        assert options == ["pat", "oauth"]
+        await select.select_option("oauth")
+        await expect(page.locator("#settings-oauth-client-id")).to_be_visible()
+        await select.select_option("pat")
+        await expect(page.locator("#connect-pat")).to_have_count(1)
+    finally:
+        await context.close()
