@@ -2,7 +2,8 @@
 
 A complete reference integration for the **MCip External Chat API** (`/api/v1/ext`):
 a browser chat UI in front of a small FastAPI backend that holds **each user's own
-MCip API key** and relays MCip's SSE answer stream back to the browser.
+MCip credential** — a pasted API key by default, or an OAuth 2.1 token obtained with
+**Connect MCip** — and relays MCip's SSE answer stream back to the browser.
 
 It is the working example that accompanies the integration guide
 ([`docs/integration-guide.md`](docs/integration-guide.md)): every error-code branch,
@@ -14,16 +15,24 @@ Your user ──► this demo's UI ──► this demo's backend ── looks up
                                        │
                                        ▼   POST /api/v1/ext/chat
                                    MCip External Chat API
-                                       │   Authorization: Bearer ss_pat_…  (that user)
+                                       │   Authorization: Bearer ss_pat_…  (paste mode)
+                                       │                or ss_oat_…        (OAuth mode)
                                        ▼
                                    SSE: start → delta… → citation… → done
 ```
 
+The mode is an admin setting (`pat`, the default, or `oauth`); the two are mutually
+exclusive at any moment, and switching back to `pat` restores the paste form.
+
 What it demonstrates, end to end:
 
-- **Per-user keys.** The key is pasted once (write-only in the UI), validated with
-  `GET /me`, encrypted at rest (Fernet), and only ever shown back as its 16-character
-  prefix. Disconnecting deletes the stored ciphertext.
+- **Per-user credentials, two ways.** In the default `pat` mode the key is pasted once
+  (write-only in the UI); in `oauth` mode the user clicks **Connect MCip** and approves
+  in MCip (authorization code + PKCE, refreshed by the demo). Either way the credential
+  is validated with `GET /me`, encrypted at rest (Fernet), and never returned to the
+  browser — the UI shows the key's 16-character prefix, or the connected MCip account in
+  OAuth mode. Disconnecting deletes the stored ciphertext and, in OAuth mode, revokes the
+  grant first.
 - **The SSE relay.** MCip's `start` / `delta` / `status` / `citation` /
   `action_rejected` / `error` / `done` events are normalized for the browser, with a
   `ui` state and a one-line `advice` attached to every error. MCip's `: keep-alive`
@@ -50,7 +59,7 @@ What it demonstrates, end to end:
   picker, and a snapshot older than 10 minutes is refreshed once per boot.
 - **Chat hardening.** HttpOnly session cookie, CSRF double-submit on every
   state-changing route, strict CSP (no inline code), demo-side rate limits, and a log
-  filter that redacts `ss_pat_…` keys.
+  filter that redacts `ss_pat_`, `ss_cli_`, `ss_oat_` and `ss_ort_` values.
 
 ## API reference (OpenAPI)
 
@@ -175,6 +184,8 @@ single Uvicorn worker: the rate limiter is an in-process, in-memory counter, so
 |---|---|
 | MCip address | Your MCip deployment, e.g. `https://mcip.example.com` (no `/api/v1/ext` suffix). `https://` only; `http://` is accepted for localhost (or with `DEMO_ALLOW_INSECURE_MCIP=true`). **Test connection** checks it, and your own key plus the client key with `GET /me`. |
 | API client key | The `ss_cli_…` key MCip shows once when the API client is created or its key rotated. Sent as `X-MCip-Client-Key` on every MCip call. Stored Fernet-encrypted; only its prefix is ever shown. Optional while the MCip client doesn't require one. |
+| Connection mode | `pat` (default): users paste an `ss_pat_…` key. `oauth`: users click **Connect MCip** and approve in MCip — no key to copy. The paste path stays available by flipping the mode back. |
+| OAuth client ID | The `mcip_cli_…` id of the registered MCip client (Settings shows the exact redirect URI to register on it). Used in `oauth` mode; the client secret is the client key above. |
 
 Until an admin saves an address, admins land on Settings and common users see "Not
 set up yet".
@@ -188,6 +199,7 @@ deliberately stay out of the GUI:
 | `DEMO_ENCRYPTION_KEY` | Fernet key that encrypts stored MCip API keys at rest. Rotating it disconnects everyone. |
 | `DEMO_SESSION_SECRET` | Signs the demo's session cookies (32+ random characters). |
 | `MCIP_BASE_URL` | Optional first-run default for the MCip address, used until an admin saves one in Settings. |
+| `DEMO_PUBLIC_URL` | The demo's public origin (`https://demo.example`), used to build the OAuth redirect URI. **Required in `oauth` mode** (a Host-derived redirect URI fails MCip's exact-match check; Settings warns when it is missing); optional in `pat` mode. Register `DEMO_PUBLIC_URL + /api/oauth/callback` on the MCip client. |
 | `DEMO_ALLOW_INSECURE_MCIP` | `false` (default). `true` allows an `http://` MCip address for a non-local host (labs only). |
 | `DEMO_ALLOW_REGISTER` | `false` (default): accounts are created with the admin CLI. `true` opens self-registration. |
 | `DEMO_HTTPS_ONLY` | `true` when served over HTTPS: cookies get the `Secure` flag and HSTS is sent. |
@@ -231,10 +243,12 @@ repository ever becomes public, rotate these first.
 1. **Sign in** as a user you created — on the test deployment, one of the
    `tester1`–`tester5` accounts above. With `DEMO_ALLOW_REGISTER=true` you can register
    in the UI instead.
-2. **Connect MCip**: paste the user's `ss_pat_…` chat key. The demo answers with who
-   you are connected as, the key's expiry and the workspaces it may use — and never
-   echoes the key. A wrong paste (e.g. a full-access key) shows the exact
-   `errorCode` and the fix next to it.
+2. **Connect MCip**: paste the user's `ss_pat_…` chat key — or, when the admin set
+   **Connection mode = oauth**, click **Connect MCip** and approve in the browser
+   (OAuth 2.1 + PKCE; no key to copy, the connection refreshes itself). Either way
+   the demo answers with who you are connected as and the workspaces you may use —
+   and never echoes a credential. A wrong paste (e.g. a full-access key) shows the
+   exact `errorCode` and the fix next to it.
 3. **Choose a workspace** from the key's list — the sidebar dropdown switches later
    (each workspace keeps its own conversations), and **Refresh** re-reads the list
    from MCip.
@@ -256,7 +270,7 @@ repository ever becomes public, rotate these first.
 
 | File | Read it for | Guide |
 |---|---|---|
-| `app/mcip.py` | The `/ext` HTTP client: request shapes, SSE parsing, `Retry-After` / `retry_after_ms` rules, the replay/content-type branch. Adapted from the example client in the guide. | §3–§5, §8 |
+| `app/mcip.py` | The `/ext` HTTP client: request shapes, SSE parsing, `Retry-After` / `retry_after_ms` rules, the replay/content-type branch; plus the OAuth pieces (PKCE, authorize URL, token/revoke calls, #1389). Adapted from the example client in the guide. | §3–§5, §8, §14 |
 | `app/relay.py` | The retry loop and the browser protocol: retry notices, `ui`/`advice` on errors, truncation → `STREAM_TRUNCATED`, what is retried and what is not. | §5, §7, §8 |
 | `app/errors.py` | The `errorCode` → `ui` state + `advice` table the whole UI switches on. | §6 |
 | `app/main.py` | The demo's own API: session/CSRF, connect flow (`GET /me`), workspace, chat SSE route, transcripts, delete; CSP and rate limits. | §4, §7, §11 |
