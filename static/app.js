@@ -12,10 +12,13 @@ export const state = {
   user: null, // {username, is_admin}
   connection: null, // {display_name, email, key_prefix, workspaces, workspace, ...}
   mcipHost: '',
+  mcipBaseUrl: '',
+  clientKeyPrefix: null,
   allowRegister: false,
   configured: false, // an MCip base URL is set (admin Settings)
   settingsOpen: false,
   authMode: 'pat', // 'pat' (paste a key) or 'oauth' (Connect MCip, #1389)
+  infoOpen: false,
 };
 
 export class ApiError extends Error {
@@ -84,6 +87,7 @@ const VIEWS = [
   'view-auth',
   'view-unconfigured',
   'view-settings',
+  'view-info',
   'view-connect',
   'view-workspace',
   'view-chat',
@@ -111,12 +115,14 @@ function route() {
   $('host-chip').hidden = !state.mcipHost;
   $('host-chip').textContent = state.mcipHost;
   $('empty-host').textContent = state.mcipHost || 'MCip';
+  $('info-host').textContent = state.mcipHost || 'MCip';
 
   renderConnectMode();
   if (!state.user) return show('view-auth');
   const isAdmin = Boolean(state.user.is_admin);
   // Admins land on Settings until the MCip address is set (first run).
   if (isAdmin && (state.settingsOpen || !state.configured)) return openSettings();
+  if (state.infoOpen) return openInfo();
   if (!state.configured) return show('view-unconfigured');
   if (!state.connection) return show('view-connect');
   if (!state.connection.workspace) return showWorkspacePicker();
@@ -156,6 +162,7 @@ function clearError(element) {
 export function sessionExpired(message) {
   state.user = null;
   state.connection = null;
+  state.infoOpen = false;
   showBanner(message || 'Your demo session expired. Sign in again.', null);
   route();
 }
@@ -171,6 +178,7 @@ export function handleReconnect(message) {
         /* the key is unusable anyway — proceed */
       }
       state.connection = null;
+      state.infoOpen = false;
       hideBanner();
       route();
     },
@@ -419,6 +427,88 @@ async function testSettings() {
   }
 }
 
+/* -- developer info -------------------------------------------------------- */
+
+function infoRow(label, value, hint = '', code = false) {
+  const dt = document.createElement('dt');
+  dt.textContent = label;
+  const dd = document.createElement('dd');
+  const valueEl = code ? document.createElement('code') : document.createElement('span');
+  valueEl.textContent = value || '—';
+  dd.append(valueEl);
+  if (hint) {
+    const note = document.createElement('p');
+    note.className = 'muted small';
+    note.textContent = hint;
+    dd.append(note);
+  }
+  return [dt, dd];
+}
+
+/** The config page for developers: addresses and key prefixes, never keys. */
+function openInfo() {
+  const connection = state.connection || {};
+  const workspaces = connection.workspaces || [];
+  const rows = [
+    infoRow(
+      'MCip base URL',
+      state.mcipBaseUrl,
+      state.mcipBaseUrl
+        ? `Your client calls this address, e.g. GET ${state.mcipBaseUrl}/api/v1/ext/me.`
+        : 'Not set yet.',
+      true,
+    ),
+    infoRow(
+      'System key (API client)',
+      state.clientKeyPrefix ? `${state.clientKeyPrefix}…` : 'Not set',
+      state.clientKeyPrefix
+        ? 'Sent to MCip as the X-MCip-Client-Key header. The full key is stored encrypted and never reaches the browser.'
+        : 'Not stored here; the demo calls MCip without an X-MCip-Client-Key header.',
+      true,
+    ),
+    infoRow(
+      'Your key (MCip user key)',
+      connection.key_prefix ? `${connection.key_prefix}…` : 'Not connected',
+      [
+        'Sent to MCip as Authorization: Bearer for your requests; the full key never reaches the browser.',
+        connection.expires_at ? `Expires ${formatWhen(connection.expires_at)}.` : '',
+      ]
+        .filter(Boolean)
+        .join(' '),
+      true,
+    ),
+    infoRow(
+      'Connected as',
+      [connection.display_name, connection.email].filter(Boolean).join(' · '),
+      '',
+    ),
+    infoRow('API client', connection.api_client_name),
+    infoRow(
+      'Workspace',
+      connection.workspace
+        ? `${connection.workspace.name} (id ${connection.workspace.id})`
+        : '',
+      workspaces.length === 1
+        ? '1 workspace available to your key.'
+        : `${workspaces.length} workspaces available to your key.`,
+    ),
+    infoRow(
+      'Workspaces refreshed',
+      connection.workspaces_updated_at ? formatWhen(connection.workspaces_updated_at) : '',
+    ),
+    infoRow('Connected at', connection.connected_at ? formatWhen(connection.connected_at) : ''),
+    infoRow(
+      'Signed in as',
+      state.user
+        ? [state.user.username, state.user.is_admin ? '(demo admin)' : ''].filter(Boolean).join(' ')
+        : '',
+    ),
+  ];
+  $('info-list').replaceChildren(...rows.flat());
+  show('view-info');
+  $('info-close').focus();
+}
+
 /* -- connect --------------------------------------------------------------- */
 
 async function submitConnect() {
@@ -505,6 +595,15 @@ function init() {
     route();
   });
 
+  $('info-button').addEventListener('click', () => {
+    state.infoOpen = true;
+    route();
+  });
+  $('info-close').addEventListener('click', () => {
+    state.infoOpen = false;
+    route();
+  });
+
   $('signout-button').addEventListener('click', async () => {
     try {
       const payload = await api('/api/logout', { method: 'POST', csrf: true });
@@ -515,6 +614,7 @@ function init() {
     state.user = null;
     state.connection = null;
     state.settingsOpen = false;
+    state.infoOpen = false;
     hideBanner();
     route();
   });
@@ -562,6 +662,8 @@ function applySession(session) {
   state.user = session.user;
   state.connection = session.connection;
   state.mcipHost = session.mcip_host || '';
+  state.mcipBaseUrl = session.mcip_base_url || '';
+  state.clientKeyPrefix = session.client_key_prefix || null;
   state.configured = Boolean(session.configured);
   state.allowRegister = session.allow_register;
   state.authMode = session.auth_mode === 'oauth' ? 'oauth' : 'pat';

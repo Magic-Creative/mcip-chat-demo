@@ -37,6 +37,11 @@ What it demonstrates, end to end:
 - **A working GUI.** Sign-in, workspace picker, streaming markdown with citations,
   conversation list, transcript pagination from MCip, delete, stop, light/dark theme,
   responsive drawer — as plain static files, no build step.
+- **Developer info in the sidebar.** A *Developer info* page lists the MCip base
+  URL, the system (API client) key prefix and your own key prefix — the same
+  16 characters MCip shows, never the full keys — plus the connection details your
+  key carries. The wiki's Developer Guide is linked from the sign-in and connect
+  cards and from the chat sidebar.
 - **A workspace switcher in the sidebar.** The dropdown lists what the connected key
   may use (plain text when there is exactly one); switching scopes the conversation
   list — chats of other workspaces stay hidden and their transcripts 404, so a stale
@@ -46,6 +51,72 @@ What it demonstrates, end to end:
 - **Chat hardening.** HttpOnly session cookie, CSRF double-submit on every
   state-changing route, strict CSP (no inline code), demo-side rate limits, and a log
   filter that redacts `ss_pat_…` keys.
+
+## API reference (OpenAPI)
+
+Every MCip deployment that has the External Chat API publishes its spec online.
+Both URLs are public (no login, no key) and cover only the external `/api/v1/ext`
+routes, not MCip's internal API:
+
+| What | URL |
+|---|---|
+| Interactive spec (Swagger UI) | `https://<mcip-host>/api/v1/ext/docs` |
+| OpenAPI 3 document (JSON) | `https://<mcip-host>/api/v1/ext/openapi.json` |
+
+Live example (demo): <https://demo-mcintelligentplus.magiccreative.ai/api/v1/ext/docs>
+
+The spec documents these endpoints, all request/response and SSE event models, and the
+`{errorCode, message, request_id}` error body:
+
+| Endpoint | Purpose | Guide |
+|---|---|---|
+| `GET /api/v1/ext/client` | Test the connection with the API client key only (`X-MCip-Client-Key`) | §3 |
+| `GET /api/v1/ext/me` | Validate a user's key: user, API client, key expiry, usable workspaces | §4.1 |
+| `POST /api/v1/ext/chat` | One chat turn, SSE stream (default) or JSON (`stream: false`) | §4.2, §5 |
+| `GET /api/v1/ext/conversations/{conversation_id}/messages` | Paged transcript of a conversation | §4.3 |
+| `DELETE /api/v1/ext/conversations/{conversation_id}` | Delete a conversation in MCip | §4.4 |
+| `…/workspaces/{workspace_id}/…` (documents, folders, search) | Knowledge base lane: upload, poll, search, folders (user's key + `kb:*` scope) | §14 |
+| `/api/v1/ext/admin/…` (users, workspaces, members) | Admin lane: manage the organization (**client key alone**) | §15 |
+
+To try a call in Swagger UI, click **Authorize** and enter a user's chat-scoped key
+(`ss_pat_…`) under `ExtApiKey` and, if your API client requires one, its client key
+(`ss_cli_…`) under `ClientKey`. A full-access key gets `403 API_KEY_SCOPE`. Use
+`/api/v1/ext/docs`, not MCip's `/swagger`: `/swagger` is the internal API and not a
+contract for callers. The wiki's
+[Developer Guide](https://github.com/Magic-Creative/mcip-chat-demo/wiki/Developer-Guide)
+is the five-minute quickstart, and the [integration guide](docs/integration-guide.md)
+covers the rules the spec can't express (retries and idempotency §8, key storage §11).
+
+### Knowledge base and Admin API
+
+Since [#1229](https://github.com/igsl-group/SurfWise/issues/1229) the same API has two
+more lanes, documented in [§14 and §15](docs/integration-guide.md) of the guide:
+
+- **Knowledge base** (`/api/v1/ext/workspaces/{workspace_id}/…`) — list, upload, poll,
+  get and delete documents, manage folders, and hybrid search over a workspace. The
+  same user's key as chat, plus a `kb:read` / `kb:write` / `kb:delete` scope (the
+  key-creation form offers what the client allows).
+- **Admin** (`/api/v1/ext/admin/…`) — provision organization users (MCip emails each a
+  set-password link), create and update workspaces, grant or remove workspace members.
+  Authenticated with the **client key alone** (`X-MCip-Client-Key`, no `Authorization`),
+  gated by the client's admin scopes.
+
+```bash
+BASE=https://mcip.example.com/api/v1/ext
+
+# Knowledge base — the user's key uploads, polls and searches
+curl -sS -X POST "$BASE/workspaces/12/documents" -H "Authorization: Bearer $MCIP_API_KEY" \
+  -H "Idempotency-Key: upload-1" -F "file=@policy.pdf" -F "folder_id=34"
+curl -sS "$BASE/workspaces/12/documents/status?ids=3381" -H "Authorization: Bearer $MCIP_API_KEY"
+curl -sS -X POST "$BASE/workspaces/12/search" -H "Authorization: Bearer $MCIP_API_KEY" \
+  -H "Content-Type: application/json" -d '{"query":"refund policy","top_k":5}'
+
+# Admin — the client key alone manages the org's users and workspaces
+curl -sS "$BASE/admin/users?q=ada" -H "X-MCip-Client-Key: $MCIP_CLIENT_KEY"
+curl -sS -X POST "$BASE/admin/workspaces" -H "X-MCip-Client-Key: $MCIP_CLIENT_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Support","owner_user_id":"<user-uuid>","external_id":"crm-ws-17"}'
+```
 
 ## Quick start
 
@@ -141,9 +212,9 @@ python -m app.admin_cli remove-user alice        # also drops their key + chats
 
 ### Demo accounts (the test deployment)
 
-The demo's test deployment has `DEMO_ALLOW_REGISTER` off; its accounts come from
-`demo-admin add-user` (and `reset-password`). One demo admin and five common users
-for testers:
+The demo's test deployment runs at <https://chatbot-mcip.igsl-group.uk>. It has
+`DEMO_ALLOW_REGISTER` off; its accounts come from `demo-admin add-user` (and
+`reset-password`). One demo admin and five common users for testers:
 
 | Username | Password | Role |
 |---|---|---|

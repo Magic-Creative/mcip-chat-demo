@@ -9,7 +9,9 @@ cleverness and every non-obvious behaviour should match a section of
 
 ```bash
 uv sync                 # create .venv with the exact pins
-cp .env.example .env    # fill in MCIP_BASE_URL, DEMO_ENCRYPTION_KEY, DEMO_SESSION_SECRET
+cp .env.example .env    # fill in DEMO_ENCRYPTION_KEY and DEMO_SESSION_SECRET
+                        # (MCIP_BASE_URL is an optional first-run default;
+                        #  the MCip address lives in the GUI: Settings)
 uv run uvicorn app.main:app --reload --port 8090
 ```
 
