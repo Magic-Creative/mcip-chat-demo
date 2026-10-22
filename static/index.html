@@ -118,7 +118,7 @@
                  placeholder="https://mcip.example.com" aria-describedby="settings-url-hint">
           <p id="settings-url-hint" class="muted small"></p>
 
-          <label for="settings-auth-mode">Connection mode</label>
+          <label for="settings-auth-mode">Default connection mode</label>
           <select id="settings-auth-mode" name="auth_mode" aria-describedby="settings-auth-hint">
             <option value="pat">Paste a key (PAT)</option>
             <option value="oauth">Connect MCip (OAuth 2.1)</option>
@@ -187,15 +187,15 @@
     <!-- Connect MCip -->
     <section id="view-connect" class="view centered" hidden>
       <div class="card">
-        <h2>Connect MCip</h2>
-        <div id="connect-pat">
-          <p class="muted">
-            Sign in to <strong id="connect-host">MCip</strong>, open
-            <a id="connect-link" href="#" target="_blank" rel="noopener">your API keys page</a>,
-            create an <em>External system</em> (chat) key and paste it here.
-          </p>
-        </div>
+        <h2>Connect to MCip</h2>
+        <p class="muted">
+          Two ways to connect — <strong>Connect MCip</strong> with your MCip
+          account, or paste an API key. Either works at any time; connecting
+          with one replaces the other for your account.
+        </p>
+
         <div id="connect-oauth" hidden>
+          <h3>Connect MCip (OAuth)</h3>
           <p class="muted">
             Connect with your MCip account — no key to copy. You sign in and
             approve the request in MCip, and the demo keeps the connection
@@ -204,32 +204,43 @@
           <p>
             <a id="connect-oauth-start" class="button primary" href="/api/oauth/start">Connect MCip</a>
           </p>
-        </div>
-        <form id="form-connect" class="stack" novalidate>
-          <label for="connect-key">MCip API key</label>
-          <input id="connect-key" name="key" type="password" autocomplete="off"
-                 spellcheck="false" placeholder="ss_pat_" required>
-          <p class="muted small">
-            The key is encrypted before it is stored. Only its first 16
-            characters are ever shown back, and it is never sent to the browser.
+          <p id="connect-oauth-note" class="muted small">
+            Uses OAuth 2.1 (authorization code + PKCE). Disconnecting revokes the
+            connection in MCip immediately.
           </p>
-          <p id="connect-error" class="field-error" role="alert" hidden></p>
-          <button id="connect-submit" class="button primary" type="submit">Connect</button>
-        </form>
-        <p id="connect-note-pat" class="muted small">
-          Revoke the key any time in MCip; the demo stops working immediately.
-          Building your own client? The
-          <a href="https://github.com/Magic-Creative/mcip-chat-demo/wiki/Developer-Guide"
-             target="_blank" rel="noopener">Developer Guide</a> walks through
-          the same flow, and the
-          <a href="https://demo-mcintelligentplus.magiccreative.ai/api/v1/ext/docs"
-             target="_blank" rel="noopener">live API spec</a> documents every
-          call and event model.
-        </p>
-        <p id="connect-oauth-note" class="muted small" hidden>
-          Uses OAuth 2.1 (authorization code + PKCE). Disconnecting revokes the
-          connection in MCip immediately.
-        </p>
+        </div>
+
+        <hr class="divider" aria-hidden="true">
+
+        <div id="connect-pat">
+          <h3>Paste an API key</h3>
+          <p class="muted">
+            Sign in to <strong id="connect-host">MCip</strong>, open
+            <a id="connect-link" href="#" target="_blank" rel="noopener">your API keys page</a>,
+            create an <em>External system</em> (chat) key and paste it here.
+          </p>
+          <form id="form-connect" class="stack" novalidate>
+            <label for="connect-key">MCip API key</label>
+            <input id="connect-key" name="key" type="password" autocomplete="off"
+                   spellcheck="false" placeholder="ss_pat_" required>
+            <p class="muted small">
+              The key is encrypted before it is stored. Only its first 16
+              characters are ever shown back, and it is never sent to the browser.
+            </p>
+            <p id="connect-error" class="field-error" role="alert" hidden></p>
+            <button id="connect-submit" class="button primary" type="submit">Connect</button>
+          </form>
+          <p id="connect-note-pat" class="muted small">
+            Revoke the key any time in MCip; the demo stops working immediately.
+            Building your own client? The
+            <a href="https://github.com/Magic-Creative/mcip-chat-demo/wiki/Developer-Guide"
+               target="_blank" rel="noopener">Developer Guide</a> walks through
+            the same flow, and the
+            <a href="https://demo-mcintelligentplus.magiccreative.ai/api/v1/ext/docs"
+               target="_blank" rel="noopener">live API spec</a> documents every
+            call and event model.
+          </p>
+        </div>
       </div>
     </section>
 

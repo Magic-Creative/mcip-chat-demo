@@ -691,6 +691,11 @@ def create_app(
             "configured": bool(base_url),
             "mcip_host": (urlsplit(base_url).netloc or base_url) if base_url else None,
             "auth_mode": await get_auth_mode(),
+            # OAuth is offered per user whenever the deployment can serve it
+            # (a client id and a public redirect origin), whatever the default
+            # mode is.
+            "oauth_ready": bool(await get_oauth_client_id())
+            and configured_public_url() is not None,
             "user": None,
             "connection": None,
         }
@@ -778,18 +783,12 @@ def create_app(
 
     @app.post("/api/connection", dependencies=[Depends(require_csrf)])
     async def connect(request: Request, payload: ConnectRequest, user_id: UserId) -> dict[str, Any]:
-        """Connect MCip with a pasted key (PAT mode only).
+        """Connect MCip with a pasted key.
 
-        The paste path stays behind the ``mcip_auth_mode`` setting (#1389):
-        flipping to 'oauth' disables it without removing the code, so a
-        deployment can roll back by flipping the setting back."""
+        Offered to every user beside Connect MCip: the deployment default no
+        longer disables either path, and connecting replaces whatever
+        credential that user had before."""
         enforce_limit(f"connect:{user_id}", settings.login_rate_per_minute, "Too many attempts.")
-        if await get_auth_mode() != AUTH_MODE_PAT:
-            raise api_error(
-                409,
-                "PAT_DISABLED",
-                "This demo uses Connect MCip (OAuth). Ask the demo admin to switch modes.",
-            )
         key = payload.key.strip()
         if not key.startswith("ss_pat_"):
             raise api_error(
@@ -868,8 +867,6 @@ def create_app(
         Generates the PKCE pair and the state, parks them **server-side**
         (``oauth_flows``; the verifier is Fernet-encrypted and never leaves
         the backend), and 303s the browser to MCip's authorize endpoint."""
-        if await get_auth_mode() != AUTH_MODE_OAUTH:
-            raise api_error(409, "OAUTH_DISABLED", "This demo connects with a pasted key.")
         client_id = await get_oauth_client_id()
         if not client_id:
             raise api_error(
@@ -886,7 +883,7 @@ def create_app(
             raise api_error(
                 503,
                 "OAUTH_PUBLIC_URL_UNSET",
-                "The demo admin must set DEMO_PUBLIC_URL in oauth mode.",
+                "The demo admin must set DEMO_PUBLIC_URL for OAuth connections.",
             )
         enforce_limit(f"connect:{user_id}", settings.login_rate_per_minute, "Too many attempts.")
         try:

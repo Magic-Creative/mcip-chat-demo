@@ -21,18 +21,21 @@ Your user ──► this demo's UI ──► this demo's backend ── looks up
                                    SSE: start → delta… → citation… → done
 ```
 
-The mode is an admin setting (`pat`, the default, or `oauth`); the two are mutually
-exclusive at any moment, and switching back to `pat` restores the paste form.
+Every signed-in user is shown **both** ways to connect — **Connect MCip** (OAuth) and the
+pasted-key form — and picks one per connection. The admin **Default connection mode**
+setting records the deployment default; it no longer disables either path. Connecting with
+one replaces the other for that user, and Connect MCip stays hidden until an OAuth client
+ID is stored and `DEMO_PUBLIC_URL` is set.
 
 What it demonstrates, end to end:
 
-- **Per-user credentials, two ways.** In the default `pat` mode the key is pasted once
-  (write-only in the UI); in `oauth` mode the user clicks **Connect MCip** and approves
-  in MCip (authorization code + PKCE, refreshed by the demo). Either way the credential
-  is validated with `GET /me`, encrypted at rest (Fernet), and never returned to the
-  browser — the UI shows the key's 16-character prefix, or the connected MCip account in
-  OAuth mode. Disconnecting deletes the stored ciphertext and, in OAuth mode, revokes the
-  grant first.
+- **Per-user credentials, two ways, side by side.** Each user either pastes a key once
+  (write-only in the UI) or clicks **Connect MCip** and approves in MCip (authorization
+  code + PKCE, refreshed by the demo); connecting with one replaces the other. Either way
+  the credential is validated with `GET /me`, encrypted at rest (Fernet), and never
+  returned to the browser — the UI shows the key's 16-character prefix, or the connected
+  MCip account for OAuth. Disconnecting deletes the stored ciphertext and, for OAuth,
+  revokes the grant first.
 - **The SSE relay.** MCip's `start` / `delta` / `status` / `citation` /
   `action_rejected` / `error` / `done` events are normalized for the browser, with a
   `ui` state and a one-line `advice` attached to every error. MCip's `: keep-alive`
@@ -184,7 +187,7 @@ single Uvicorn worker: the rate limiter is an in-process, in-memory counter, so
 |---|---|
 | MCip address | Your MCip deployment, e.g. `https://mcip.example.com` (no `/api/v1/ext` suffix). `https://` only; `http://` is accepted for localhost (or with `DEMO_ALLOW_INSECURE_MCIP=true`). **Test connection** checks it, and your own key plus the client key with `GET /me`. |
 | API client key | The `ss_cli_…` key MCip shows once when the API client is created or its key rotated. Sent as `X-MCip-Client-Key` on every MCip call. Stored Fernet-encrypted; only its prefix is ever shown. Optional while the MCip client doesn't require one. |
-| Connection mode | `pat` (default): users paste an `ss_pat_…` key. `oauth`: users click **Connect MCip** and approve in MCip — no key to copy. The paste path stays available by flipping the mode back. |
+| Default connection mode | `pat` (default) or `oauth`. Records the deployment default only: every user is shown both **Connect MCip** and the pasted-key form and chooses per connection. Connect MCip is hidden until an OAuth client ID is stored and `DEMO_PUBLIC_URL` is set. |
 | OAuth client ID | The `mcip_cli_…` id of the registered MCip client (Settings shows the exact redirect URI to register on it). Used in `oauth` mode; the client secret is the client key above. |
 
 Until an admin saves an address, admins land on Settings and common users see "Not
@@ -243,8 +246,8 @@ repository ever becomes public, rotate these first.
 1. **Sign in** as a user you created — on the test deployment, one of the
    `tester1`–`tester5` accounts above. With `DEMO_ALLOW_REGISTER=true` you can register
    in the UI instead.
-2. **Connect MCip**: paste the user's `ss_pat_…` chat key — or, when the admin set
-   **Connection mode = oauth**, click **Connect MCip** and approve in the browser
+2. **Connect MCip**: paste the user's `ss_pat_…` chat key, or click **Connect MCip**
+   and approve in the browser
    (OAuth 2.1 + PKCE; no key to copy, the connection refreshes itself). Either way
    the demo answers with who you are connected as and the workspaces you may use —
    and never echoes a credential. A wrong paste (e.g. a full-access key) shows the
