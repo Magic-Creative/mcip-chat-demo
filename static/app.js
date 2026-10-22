@@ -17,7 +17,8 @@ export const state = {
   allowRegister: false,
   configured: false, // an MCip base URL is set (admin Settings)
   settingsOpen: false,
-  authMode: 'pat', // 'pat' (paste a key) or 'oauth' (Connect MCip, #1389)
+  authMode: 'pat', // the deployment default (kept for hints)
+  oauthReady: false, // this deployment can serve Connect MCip
   infoOpen: false,
 };
 
@@ -135,14 +136,17 @@ function route() {
  * Connect MCip (OAuth mode). Both keep the same bottom notes.
  */
 function renderConnectMode() {
-  const oauth = state.authMode === 'oauth';
-  $('connect-pat').hidden = oauth;
-  $('connect-oauth').hidden = !oauth;
-  $('connect-oauth-note').hidden = !oauth;
-  $('connect-note-pat').hidden = oauth;
-  $('disconnect').textContent = oauth
-    ? 'Disconnect MCip connection'
-    : 'Disconnect MCip key';
+  // Both ways to connect are offered to every user; the choice is per
+  // connection, and connecting with one replaces the other. Connect MCip only
+  // appears when this deployment can actually serve it (client id + public
+  // redirect origin), so a tester never lands on a button that cannot work.
+  $('connect-pat').hidden = false;
+  $('connect-oauth').hidden = !state.oauthReady;
+  $('connect-oauth-note').hidden = !state.oauthReady;
+  $('connect-note-pat').hidden = false;
+  const connectedMode = state.connection && state.connection.auth_mode;
+  $('disconnect').textContent =
+    connectedMode === 'oauth' ? 'Disconnect MCip connection' : 'Disconnect MCip key';
 }
 
 /* -- errors ---------------------------------------------------------------- */
@@ -300,12 +304,10 @@ function describeSettings(view) {
     ? `Stored: ${view.client_key_prefix}… (saved by ${view.client_key_updated_by || 'an admin'} on ${formatWhen(view.client_key_updated_at)}). Leave blank to keep it.`
     : 'No client key stored. Needed when the MCip API client requires one.';
   $('settings-auth-hint').textContent =
-    view.auth_mode === 'oauth'
-      ? 'Users connect with Connect MCip (OAuth 2.1); the pasted-key form is disabled.'
-      : 'Users paste an MCip key. Connect MCip (OAuth) arrives with the stored OAuth client ID.';
+    'Both ways to connect are offered to every user, side by side. This setting records the deployment default; it no longer disables either path.';
   const publicUrlWarning =
-    view.auth_mode === 'oauth' && view.public_url_configured === false
-      ? ' DEMO_PUBLIC_URL is not set: connecting is refused until an admin sets it.'
+    view.public_url_configured === false
+      ? ' DEMO_PUBLIC_URL is not set: Connect MCip stays hidden until an admin sets it.'
       : '';
   $('settings-oauth-hint').textContent =
     (view.oauth_client_id
@@ -667,6 +669,7 @@ function applySession(session) {
   state.configured = Boolean(session.configured);
   state.allowRegister = session.allow_register;
   state.authMode = session.auth_mode === 'oauth' ? 'oauth' : 'pat';
+  state.oauthReady = Boolean(session.oauth_ready);
   $('connect-host').textContent = state.mcipHost || 'MCip';
   $('connect-link').href = state.mcipHost
     ? `https://${state.mcipHost}/user-settings/api-key`

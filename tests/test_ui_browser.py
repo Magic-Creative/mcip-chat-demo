@@ -23,7 +23,7 @@ import httpx
 import pytest
 import uvicorn
 
-from app.store import Store
+from app.store import SETTING_OAUTH_CLIENT_ID, Store
 from tests.conftest import DemoSession
 from tests.fake_mcip import FakeMcip, scripted_turn
 
@@ -335,5 +335,33 @@ async def test_the_connection_mode_switch_defaults_to_pat_and_offers_oauth(
         await expect(page.locator("#settings-oauth-client-id")).to_be_visible()
         await select.select_option("pat")
         await expect(page.locator("#connect-pat")).to_have_count(1)
+    finally:
+        await context.close()
+
+
+async def test_the_connect_view_offers_both_paths(
+    browser: Browser, live_url: str, store: Store, monkeypatch
+) -> None:
+    """#19 follow-up: Connect MCip and the pasted key sit side by side."""
+    monkeypatch.setenv("DEMO_PUBLIC_URL", "http://demo.test")
+    store.set_setting(SETTING_OAUTH_CLIENT_ID, "mcip_cli_browser", updated_by="admin")
+    store.create_user("bob", "password123")
+    async with httpx.AsyncClient(base_url=live_url) as client:
+        session = DemoSession(client)
+        await session.boot()
+        assert (await session.login("bob")).status_code == 200
+        cookies = [
+            {"name": cookie.name, "value": cookie.value, "url": live_url}
+            for cookie in client.cookies.jar
+        ]
+    context = await browser.new_context()
+    await context.add_cookies(cookies)
+    try:
+        page = await context.new_page()
+        await page.goto(live_url + "/")
+        await expect(page.locator("#view-connect")).to_be_visible()
+        await expect(page.locator("#connect-pat")).to_be_visible()
+        await expect(page.locator("#connect-oauth")).to_be_visible()
+        await expect(page.locator("#connect-oauth-start")).to_be_visible()
     finally:
         await context.close()

@@ -66,14 +66,22 @@ async def _connect_oauth(session: DemoSession, store, fake: FakeMcip) -> tuple[s
     return redirect_uri, alice_id
 
 
-async def test_start_requires_oauth_mode(session: DemoSession, store, fake: FakeMcip):
+async def test_start_works_whatever_the_deployment_default(
+    session: DemoSession, store, fake: FakeMcip
+):
+    """#19 follow-up: OAuth is offered per user, not gated on the default mode."""
+    await _enable_oauth(session, store, fake)
+    # Back to the pat default; the client id and the public origin stay.
+    assert (
+        await session.put("/api/admin/settings", {"auth_mode": AUTH_MODE_PAT})
+    ).status_code == 200
     store.create_user("alice", "password123")
     assert (await session.login("alice")).status_code == 200
 
-    response = await session.client.get("/api/oauth/start")
+    start = await session.client.get("/api/oauth/start")
 
-    assert response.status_code == 409
-    assert response.json()["errorCode"] == "OAUTH_DISABLED"
+    assert start.status_code == 303
+    assert start.headers["location"].startswith("http://mcip.test")
 
 
 async def test_start_requires_a_client_id(session: DemoSession, store, fake: FakeMcip):
@@ -389,15 +397,52 @@ async def test_disconnect_reports_a_failed_revoke_but_still_deletes(
     assert store.get_connection(alice_id) is None, "local delete is never blocked"
 
 
-async def test_oauth_mode_disables_the_paste_path(session: DemoSession, store, fake: FakeMcip):
+async def test_the_paste_path_works_whatever_the_deployment_default(
+    session: DemoSession, store, fake: FakeMcip
+):
+    """#19 follow-up: a user can paste a key even when the default is OAuth."""
     await _enable_oauth(session, store, fake)
     store.create_user("alice", "password123")
     assert (await session.login("alice")).status_code == 200
 
     response = await session.connect()
 
-    assert response.status_code == 409
-    assert response.json()["errorCode"] == "PAT_DISABLED"
+    assert response.status_code == 200
+    assert response.json()["connection"]["auth_mode"] == AUTH_MODE_PAT
+
+
+async def test_session_reports_whether_oauth_is_available(
+    session: DemoSession, store, fake: FakeMcip
+):
+    """The connect view hides Connect MCip until the deployment can serve it."""
+    store.create_user("alice", "password123")
+    assert (await session.login("alice")).status_code == 200
+    assert (await session.boot())["oauth_ready"] is False
+
+    await _enable_oauth(session, store, fake)
+    assert (await session.login("alice")).status_code == 200
+    assert (await session.boot())["oauth_ready"] is True
+
+
+async def test_connecting_with_a_key_replaces_an_oauth_connection(
+    session: DemoSession, store, fake: FakeMcip
+):
+    """One credential per user: the paste path clears the OAuth tokens."""
+    await _connect_oauth(session, store, fake)
+    alice_id = int(store.get_user("alice")["id"])
+    assert store.get_oauth_tokens(alice_id) is not None
+
+    response = await session.connect()
+
+    assert response.status_code == 200
+    assert store.get_oauth_tokens(alice_id) is None
+    with store._connect() as connection:
+        row = connection.execute(
+            "SELECT auth_mode, access_ciphertext FROM mcip_connections WHERE user_id = ?",
+            (alice_id,),
+        ).fetchone()
+    assert row["auth_mode"] == AUTH_MODE_PAT
+    assert row["access_ciphertext"] is None
 
 
 async def test_session_and_settings_expose_the_mode(session: DemoSession, store, fake: FakeMcip):

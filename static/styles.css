@@ -811,3 +811,10 @@ textarea {
 .info-list dd p {
   margin: 0.15rem 0 0;
 }
+
+/* Connect view: separates the two ways to connect (#19 follow-up). */
+.divider {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 0.5rem 0 1rem;
+}
