@@ -282,9 +282,7 @@ async def test_a_browser_supplied_client_request_id_is_used_and_echoed(
     ready: DemoSession, fake: FakeMcip
 ):
     fake.enqueue_sse(scripted_turn("Ok."))
-    response = await ready.post(
-        "/api/chat", {"message": "hi", "client_request_id": "web-0000abcd"}
-    )
+    response = await ready.post("/api/chat", {"message": "hi", "client_request_id": "web-0000abcd"})
     assert response.status_code == 200
     assert parse_sse_text(response.text)[0]["client_request_id"] == "web-0000abcd"
     assert fake.chat_requests[-1]["client_request_id"] == "web-0000abcd"
@@ -412,9 +410,7 @@ async def test_a_retried_first_turn_follows_the_new_mcip_conversation(
     # the orphaned first conversation is gone from MCip, and the local row now
     # reads the retry's answer from the new one
     assert fake.deleted == [900]
-    page = await ready.client.get(
-        f"/api/conversations/{started['local_conversation_id']}/messages"
-    )
+    page = await ready.client.get(f"/api/conversations/{started['local_conversation_id']}/messages")
     assert page.status_code == 200
     assert page.json()["messages"] == [
         {"id": 1, "role": "user", "content": "Refund policy?"},
