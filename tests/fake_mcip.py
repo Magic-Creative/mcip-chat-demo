@@ -272,8 +272,14 @@ class FakeMcip:
         async def me(request: Request) -> Response:
             bearer = request.headers.get("authorization", "")
             self.me_requests.append(bearer)
+            client_key = request.headers.get("x-mcip-client-key")
+            self.client_keys_seen.append(client_key)
             oauth_token = bearer.removeprefix("Bearer ").strip()
             if oauth_token.startswith(("ss_oat_", "ss_ort_")):
+                if client_key:
+                    # MCip refuses a user credential presented together with a
+                    # client key (#1353 AMBIGUOUS_PRINCIPAL).
+                    return JSONResponse(error_body("AMBIGUOUS_PRINCIPAL"), status_code=400)
                 self.oauth_me_bearers.append(oauth_token)
                 if self.oauth_me_error_once is not None:
                     status, body = self.oauth_me_error_once
@@ -291,8 +297,6 @@ class FakeMcip:
                     **(payload.get("key") or {}),
                 }
                 return JSONResponse(payload)
-            client_key = request.headers.get("x-mcip-client-key")
-            self.client_keys_seen.append(client_key)
             if self.required_client_key is not None:
                 if not client_key:
                     return JSONResponse(error_body("CLIENT_KEY_MISSING"), status_code=401)

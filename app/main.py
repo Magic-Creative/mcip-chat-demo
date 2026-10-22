@@ -479,13 +479,19 @@ def create_app(
                 pass
         await refresh_oauth_tokens(user_id)
 
-    async def mcip_client(key: str) -> McipClient:
+    async def mcip_client(key: str, *, send_client_key: bool = True) -> McipClient:
+        """A client for one credential.
+
+        ``send_client_key=False`` for an OAuth access token: MCip refuses a
+        request that carries both a user credential and a client key
+        (``AMBIGUOUS_PRINCIPAL``), so only the bearer is sent in oauth mode.
+        """
         base_url = await current_base_url()
         if not base_url:
             raise api_error(
                 503, "DEMO_NOT_CONFIGURED", "The demo admin has not set the MCip address yet."
             )
-        client_key = await asyncio.to_thread(store.get_client_key)
+        client_key = await asyncio.to_thread(store.get_client_key) if send_client_key else None
         return McipClient(base_url, key, client_key=client_key, transport=mcip_transport)
 
     async def open_mcip(user_id: int) -> McipClient:
@@ -509,7 +515,7 @@ def create_app(
                     "OAUTH_RECONNECT",
                     "The MCip connection expired. Connect again.",
                 )
-            return await mcip_client(str(access))
+            return await mcip_client(str(access), send_client_key=False)
         key = await asyncio.to_thread(store.get_api_key, user_id)
         if not key:
             raise api_error(401, "NOT_CONNECTED", "Connect your MCip key first.")
@@ -983,7 +989,7 @@ def create_app(
             return fail("OAUTH_EXCHANGE_FAILED", "MCip's token response was incomplete.")
         try:
             async with McipClient(
-                base_url, access, client_key=client_key, transport=mcip_transport
+                base_url, access, transport=mcip_transport
             ) as mcip:
                 me = await mcip.me()
         except ExtApiError as exc:

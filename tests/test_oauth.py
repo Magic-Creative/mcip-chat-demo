@@ -147,6 +147,18 @@ async def test_callback_exchanges_the_code_with_pkce_and_stores_the_connection(
     assert boot["connection"]["workspaces"], "the /me snapshot was stored"
 
 
+async def test_oauth_me_omits_the_client_key(session: DemoSession, store, fake: FakeMcip):
+    """#19: MCip refuses a user credential plus a client key (AMBIGUOUS_PRINCIPAL).
+
+    In oauth mode the access token is the credential; the client key belongs
+    only to the token/revoke calls (Basic auth).
+    """
+    store.set_client_key("ss_cli_demo0000000000000000", updated_by="admin")
+    await _connect_oauth(session, store, fake)
+    assert fake.client_keys_seen, "the connect made a /me call"
+    assert fake.client_keys_seen[-1] is None, "the OAuth /me must not carry a client key"
+
+
 async def test_callback_state_is_single_use(session: DemoSession, store, fake: FakeMcip):
     redirect_uri, _ = await _connect_oauth(session, store, fake)
     start = await session.client.get("/api/oauth/start")
