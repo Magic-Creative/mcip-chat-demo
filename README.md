@@ -2,7 +2,8 @@
 
 A complete reference integration for the **MCip External Chat API** (`/api/v1/ext`):
 a browser chat UI in front of a small FastAPI backend that holds **each user's own
-MCip API key** and relays MCip's SSE answer stream back to the browser.
+MCip credential** — a pasted API key by default, or an OAuth 2.1 token obtained with
+**Connect MCip** — and relays MCip's SSE answer stream back to the browser.
 
 It is the working example that accompanies the integration guide
 ([`docs/integration-guide.md`](docs/integration-guide.md)): every error-code branch,
@@ -14,16 +15,24 @@ Your user ──► this demo's UI ──► this demo's backend ── looks up
                                        │
                                        ▼   POST /api/v1/ext/chat
                                    MCip External Chat API
-                                       │   Authorization: Bearer ss_pat_…  (that user)
+                                       │   Authorization: Bearer ss_pat_…  (paste mode)
+                                       │                or ss_oat_…        (OAuth mode)
                                        ▼
                                    SSE: start → delta… → citation… → done
 ```
 
+The mode is an admin setting (`pat`, the default, or `oauth`); the two are mutually
+exclusive at any moment, and switching back to `pat` restores the paste form.
+
 What it demonstrates, end to end:
 
-- **Per-user keys.** The key is pasted once (write-only in the UI), validated with
-  `GET /me`, encrypted at rest (Fernet), and only ever shown back as its 16-character
-  prefix. Disconnecting deletes the stored ciphertext.
+- **Per-user credentials, two ways.** In the default `pat` mode the key is pasted once
+  (write-only in the UI); in `oauth` mode the user clicks **Connect MCip** and approves
+  in MCip (authorization code + PKCE, refreshed by the demo). Either way the credential
+  is validated with `GET /me`, encrypted at rest (Fernet), and never returned to the
+  browser — the UI shows the key's 16-character prefix, or the connected MCip account in
+  OAuth mode. Disconnecting deletes the stored ciphertext and, in OAuth mode, revokes the
+  grant first.
 - **The SSE relay.** MCip's `start` / `delta` / `status` / `citation` /
   `action_rejected` / `error` / `done` events are normalized for the browser, with a
   `ui` state and a one-line `advice` attached to every error. MCip's `: keep-alive`
@@ -50,7 +59,7 @@ What it demonstrates, end to end:
   picker, and a snapshot older than 10 minutes is refreshed once per boot.
 - **Chat hardening.** HttpOnly session cookie, CSRF double-submit on every
   state-changing route, strict CSP (no inline code), demo-side rate limits, and a log
-  filter that redacts `ss_pat_…` keys.
+  filter that redacts `ss_pat_`, `ss_cli_`, `ss_oat_` and `ss_ort_` values.
 
 ## API reference (OpenAPI)
 

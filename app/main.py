@@ -857,7 +857,7 @@ def create_app(
 
     @app.get("/api/oauth/start")
     async def oauth_start(request: Request, user_id: UserId) -> RedirectResponse:
-        """Begin Connect MCip (#1389, Guide §16.1).
+        """Begin Connect MCip (#1389, Guide §14.1).
 
         Generates the PKCE pair and the state, parks them **server-side**
         (``oauth_flows``; the verifier is Fernet-encrypted and never leaves

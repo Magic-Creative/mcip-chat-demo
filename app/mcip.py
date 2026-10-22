@@ -152,7 +152,7 @@ class ChatStream:
 
 CLIENT_KEY_HEADER = "X-MCip-Client-Key"
 
-# --- OAuth 2.1 authorization code + PKCE (#1389, Guide §16) ------------------
+# --- OAuth 2.1 authorization code + PKCE (#1389, Guide §14) ------------------
 
 #: Phase 1 lane A carries the chat scope; knowledge-base scopes land with the
 #: KB integration. The demo only asks for what it uses.
@@ -200,7 +200,7 @@ def build_authorize_url(
     state: str,
     code_challenge: str,
 ) -> str:
-    """The browser URL (§16.1): every parameter explicit, PKCE S256."""
+    """The browser URL (§14.1): every parameter explicit, PKCE S256."""
     query = urlencode(
         {
             "response_type": "code",
@@ -230,7 +230,7 @@ async def oauth_token_request(
     transport: httpx.AsyncBaseTransport | None = None,
     timeout_s: float = 30.0,
 ) -> dict[str, Any]:
-    """``POST /oauth/token`` with Basic client auth (§16.2, §16.4).
+    """``POST /oauth/token`` with Basic client auth (§14.2, §14.4).
 
     Raises :class:`OAuthProtocolError` for RFC 6749 §5.2 bodies and lets
     ``httpx.TransportError`` through (the caller decides reconnect vs retry).
@@ -262,7 +262,7 @@ async def fetch_issuer(
     transport: httpx.AsyncBaseTransport | None = None,
     timeout_s: float = 15.0,
 ) -> str:
-    """The AS metadata's ``issuer`` (RFC 8414, §16.1).
+    """The AS metadata's ``issuer`` (RFC 8414, §14.1).
 
     The callback compares the authorization response's ``iss`` against the
     value recorded here **exactly** (RFC 9207 §2.4), so it must be the
@@ -299,7 +299,7 @@ async def oauth_revoke_token(
     transport: httpx.AsyncBaseTransport | None = None,
     timeout_s: float = 30.0,
 ) -> bool:
-    """``POST /oauth/revoke`` (§16.5). RFC 7009 answers 200 for known,
+    """``POST /oauth/revoke`` (§14.5). RFC 7009 answers 200 for known,
     unknown and already-revoked tokens alike; ``False`` means MCip refused
     the request itself (the caller still deletes locally)."""
     async with httpx.AsyncClient(
