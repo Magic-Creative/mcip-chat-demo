@@ -35,6 +35,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 API_PREFIX = "/api/v1/ext"
+OAUTH_PREFIX = "/api/v1/oauth"
 
 DEFAULT_ME = {
     "user": {"id": "u-1", "display_name": "Ada Demo", "email": "ada@example.com"},
@@ -309,13 +310,13 @@ class FakeMcip:
             return JSONResponse(
                 {
                     "issuer": self.oauth_issuer,
-                    "authorization_endpoint": f"{API_PREFIX}/oauth/authorize",
-                    "token_endpoint": f"{API_PREFIX}/oauth/token",
+                    "authorization_endpoint": f"{OAUTH_PREFIX}/authorize",
+                    "token_endpoint": f"{OAUTH_PREFIX}/token",
                     "code_challenge_methods_supported": ["S256"],
                 }
             )
 
-        @app.post(f"{API_PREFIX}/oauth/token")
+        @app.post(f"{OAUTH_PREFIX}/token")
         async def oauth_token(request: Request) -> Response:
             form = await self._form_of(request)
             authorization = request.headers.get("authorization", "")
@@ -349,7 +350,7 @@ class FakeMcip:
                 return JSONResponse(self._token_response(refresh_token=None))
             return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
 
-        @app.post(f"{API_PREFIX}/oauth/revoke")
+        @app.post(f"{OAUTH_PREFIX}/revoke")
         async def oauth_revoke(request: Request) -> Response:
             form = await self._form_of(request)
             authorization = request.headers.get("authorization", "")

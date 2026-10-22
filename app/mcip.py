@@ -24,6 +24,8 @@ from urllib.parse import quote, urlencode
 import httpx
 
 API_PREFIX = "/api/v1/ext"
+#: OAuth 2.1 sits beside the ext surface, not under it (#1353): /api/v1/oauth/*.
+OAUTH_PREFIX = "/api/v1/oauth"
 #: Matches the server's 600 s budget for one turn (Guide §7).
 DEFAULT_TIMEOUT_S = 600.0
 #: Wait when a retryable response names no usable delay (Guide §8).
@@ -212,7 +214,7 @@ def build_authorize_url(
             "code_challenge_method": "S256",
         }
     )
-    return f"{base_url.rstrip('/')}{API_PREFIX}/oauth/authorize?{query}"
+    return f"{base_url.rstrip('/')}{OAUTH_PREFIX}/authorize?{query}"
 
 
 def _basic_auth(client_id: str, client_key: str) -> str:
@@ -239,7 +241,7 @@ async def oauth_token_request(
         base_url=base_url.rstrip("/"), transport=transport, timeout=timeout_s
     ) as http:
         response = await http.post(
-            f"{API_PREFIX}/oauth/token",
+            f"{OAUTH_PREFIX}/token",
             data=form,
             headers={
                 "Authorization": f"Basic {_basic_auth(client_id, client_key)}",
@@ -306,7 +308,7 @@ async def oauth_revoke_token(
         base_url=base_url.rstrip("/"), transport=transport, timeout=timeout_s
     ) as http:
         response = await http.post(
-            f"{API_PREFIX}/oauth/revoke",
+            f"{OAUTH_PREFIX}/revoke",
             data={"token": token},
             headers={
                 "Authorization": f"Basic {_basic_auth(client_id, client_key)}",

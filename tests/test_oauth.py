@@ -47,7 +47,7 @@ async def _connect_oauth(session: DemoSession, store, fake: FakeMcip) -> tuple[s
     start = await session.client.get("/api/oauth/start")
     assert start.status_code == 303
     url = urlsplit(start.headers["location"])
-    assert url.path == "/api/v1/ext/oauth/authorize"
+    assert url.path == "/api/v1/oauth/authorize"
     query = parse_qs(url.query)
     assert query["code_challenge_method"] == ["S256"]
     assert query["response_type"] == ["code"]
