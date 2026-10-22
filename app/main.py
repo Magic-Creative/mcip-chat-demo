@@ -988,9 +988,7 @@ def create_app(
         if not access or not refresh:
             return fail("OAUTH_EXCHANGE_FAILED", "MCip's token response was incomplete.")
         try:
-            async with McipClient(
-                base_url, access, transport=mcip_transport
-            ) as mcip:
+            async with McipClient(base_url, access, transport=mcip_transport) as mcip:
                 me = await mcip.me()
         except ExtApiError as exc:
             return fail(
